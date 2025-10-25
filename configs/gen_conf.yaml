@@ -1,0 +1,13 @@
+dataset:
+  path: data/jtvae_training.csv
+  target_columns: [HOMO, LUMO]
+  max_fragments: 12
+model:
+  z_dim: 64
+  hidden_dim: 256
+  cond_dim: 2
+training:
+  epochs: 80
+  batch_size: 32
+  lr: 0.001
+save_dir: models/generator
