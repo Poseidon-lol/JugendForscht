@@ -17,6 +17,7 @@ import os
 import torch
 import numpy as np
 from src.models.mpnn import MPModel, MoleculeDataset, train_one, evaluate
+from src.utils.device import ensure_state_dict_on_cpu, get_device, move_to_device
 
 from pathlib import Path
 import sys
@@ -30,7 +31,7 @@ def train_ensemble(df, model_dir, n_models=3, epochs=20, batch_size=16, lr=1e-3,
     """
     Train n_models on the same dataset, save each model to disk.
     """
-    device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device_spec = get_device(device)
     os.makedirs(model_dir, exist_ok=True)
     
     for i in range(n_models):
@@ -42,19 +43,19 @@ def train_ensemble(df, model_dir, n_models=3, epochs=20, batch_size=16, lr=1e-3,
         node_dim = dataset[0].x.size(1)
         edge_dim = dataset[0].edge_attr.size(1)
         out_dim = dataset[0].y.size(1)
-        model = MPModel(node_in_dim=node_dim, edge_in_dim=edge_dim, out_dim=out_dim).to(device)
+        model = MPModel(node_in_dim=node_dim, edge_in_dim=edge_dim, out_dim=out_dim).to(device_spec.target)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         
         # Training loop
         for epoch in range(epochs):
-            loss = train_one(model, loader, optimizer, device)
+            loss = train_one(model, loader, optimizer, device_spec)
             if (epoch+1) % 5 == 0 or epoch == 0:
-                val_mae, _, _ = evaluate(model, loader, device)
+                val_mae, _, _ = evaluate(model, loader, device_spec)
                 print(f"Epoch {epoch+1}/{epochs}, Train Loss: {loss:.4f}, Val MAE: {val_mae:.4f}")
         
         # Save model
         path = os.path.join(model_dir, f"ensemble_model_{i}.pt")
-        torch.save(model.state_dict(), path)
+        torch.save(ensure_state_dict_on_cpu(model, device_spec), path)
         print(f"Saved model {i} to {path}")
 
 # -----------------------------
@@ -64,7 +65,7 @@ def ensemble_predict(model_dir, dataset, device=None):
     """
     Load all ensemble models and predict on dataset, return mean + std.
     """
-    device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device_spec = get_device(device)
     n_models = len([f for f in os.listdir(model_dir) if f.endswith('.pt')])
     
     preds = []
@@ -74,14 +75,16 @@ def ensemble_predict(model_dir, dataset, device=None):
         path = os.path.join(model_dir, f"ensemble_model_{i}.pt")
         model = MPModel(node_in_dim=dataset[0].x.size(1),
                         edge_in_dim=dataset[0].edge_attr.size(1),
-                        out_dim=dataset[0].y.size(1)).to(device)
-        model.load_state_dict(torch.load(path, map_location=device))
+                        out_dim=dataset[0].y.size(1))
+        state = torch.load(path, map_location=device_spec.map_location)
+        model.load_state_dict(state)
+        model = model.to(device_spec.target)
         model.eval()
         
         all_preds = []
         with torch.no_grad():
             for batch in loader:
-                batch = batch.to(device)
+                batch = move_to_device(batch, device_spec)
                 out = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
                 all_preds.append(out.cpu().numpy())
         preds.append(np.concatenate(all_preds, axis=0))

@@ -59,6 +59,8 @@ except Exception:
     # fallback if running from different working dir
     from src.data.featurization import mol_to_graph
 
+from src.utils.device import DeviceSpec, ensure_state_dict_on_cpu, get_device, move_to_device
+
 
 # -----------------------------
 # MPNN building blocks
@@ -169,15 +171,17 @@ class MoleculeDataset(PyGDataset):
 # Training & evaluation utilities
 # -----------------------------
 
-def train_one(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer, device: torch.device,
-              loss_fn=None):
+def train_one(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer,
+              device: DeviceSpec | torch.device | str, loss_fn=None):
+    device_spec = get_device(device)
+    target = device_spec.target
     model.train()
     total_loss = 0.0
     for batch in loader:
-        batch = batch.to(device)
+        batch = move_to_device(batch, device_spec)
         optimizer.zero_grad()
         pred = model(batch)
-        y = batch.y.view(pred.size(0), -1).to(device)
+        y = batch.y.view(pred.size(0), -1).to(target)
         if loss_fn is None:
             loss = F.l1_loss(pred, y)  # MAE
         else:
@@ -188,7 +192,10 @@ def train_one(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optim
     return total_loss / len(loader.dataset)
 
 
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, loss_fn=None) -> Tuple[float, np.ndarray, np.ndarray]:
+def evaluate(model: nn.Module, loader: DataLoader, device: DeviceSpec | torch.device | str,
+             loss_fn=None) -> Tuple[float, np.ndarray, np.ndarray]:
+    device_spec = get_device(device)
+    target = device_spec.target
     model.eval()
     preds = []
     trues = []
@@ -196,12 +203,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, loss_fn
     n_total = 0
     with torch.no_grad():
         for batch in loader:
-            batch = batch.to(device)
+            batch = move_to_device(batch, device_spec)
             out = model(batch)
             preds.append(out.cpu().numpy())
             trues.append(batch.y.view(out.size(0), -1).cpu().numpy())
             if loss_fn is not None:
-                loss_val = loss_fn(out, batch.y.view(out.size(0), -1).to(device))
+                loss_val = loss_fn(out, batch.y.view(out.size(0), -1).to(target))
                 loss_accum += loss_val.item() * out.size(0)
                 n_total += out.size(0)
     preds = np.vstack(preds)
@@ -226,7 +233,7 @@ def train_ensemble(df, model_save_dir: str, n_models: int = 5, epochs: int = 50,
         model_save_dir: directory to save checkpoints
         n_models: number of ensemble members
     """
-    device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+    device_spec = get_device(device)
     os.makedirs(model_save_dir, exist_ok=True)
 
     # simple split
@@ -246,7 +253,7 @@ def train_ensemble(df, model_save_dir: str, n_models: int = 5, epochs: int = 50,
     for i in range(n_models):
         torch.manual_seed(1000 + i)
         model = MPModel(node_in_dim=node_dim, edge_in_dim=edge_dim, out_dim=out_dim, dropout=dropout)
-        model = model.to(device)
+        model = model.to(device_spec.target)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
         if loss == 'mae':
@@ -258,11 +265,14 @@ def train_ensemble(df, model_save_dir: str, n_models: int = 5, epochs: int = 50,
 
         best_val = 1e9
         for epoch in range(1, epochs + 1):
-            train_loss = train_one(model, train_loader, optimizer, device, loss_fn=loss_fn)
-            val_mae, _, _ = evaluate(model, val_loader, device, loss_fn=loss_fn)
+            train_loss = train_one(model, train_loader, optimizer, device_spec, loss_fn=loss_fn)
+            val_mae, _, _ = evaluate(model, val_loader, device_spec, loss_fn=loss_fn)
             if val_mae < best_val:
                 best_val = val_mae
-                torch.save(model.state_dict(), os.path.join(model_save_dir, f'mpnn_member_{i}.pt'))
+                torch.save(
+                    ensure_state_dict_on_cpu(model, device_spec),
+                    os.path.join(model_save_dir, f'mpnn_member_{i}.pt')
+                )
             if epoch % 10 == 0 or epoch == 1:
                 print(f"Model {i} Epoch {epoch:03d} train_loss={train_loss:.4f} val_mae={val_mae:.4f}")
 
@@ -279,7 +289,7 @@ def ensemble_predict(model_dir: str, dataset, device: str = None) -> Tuple[np.nd
     Returns:
         mean_pred: [N, out_dim], std_pred: [N, out_dim]
     """
-    device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+    device_spec = get_device(device)
     ckpts = sorted([f for f in os.listdir(model_dir) if f.endswith('.pt')])
     if len(ckpts) == 0:
         raise FileNotFoundError(f"No .pt files found in {model_dir}")
@@ -289,13 +299,14 @@ def ensemble_predict(model_dir: str, dataset, device: str = None) -> Tuple[np.nd
     for ckpt in ckpts:
         model = MPModel(node_in_dim=dataset[0].x.size(1), edge_in_dim=dataset[0].edge_attr.size(1),
                         out_dim=dataset[0].y.size(1))
-        model.load_state_dict(torch.load(os.path.join(model_dir, ckpt), map_location=device))
-        model = model.to(device)
+        state = torch.load(os.path.join(model_dir, ckpt), map_location=device_spec.map_location)
+        model.load_state_dict(state)
+        model = model.to(device_spec.target)
         model.eval()
         all_preds = []
         with torch.no_grad():
             for batch in loader:
-                batch = batch.to(device)
+                batch = move_to_device(batch, device_spec)
                 out = model(batch)
                 all_preds.append(out.cpu().numpy())
         preds_collect.append(np.vstack(all_preds))

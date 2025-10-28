@@ -71,15 +71,16 @@ __all__ = [
 
 @dataclass
 class NormalizationStats:
-    """Simple container for normalisation parameters (mean/std per column)."""
+    """Simple container für normalisations parameter (mean/std pro column)"""
 
     mean: pd.Series
     std: pd.Series
 
+    @classmethod
     def to_dict(self) -> Dict[str, Dict[str, float]]:
         return {"mean": self.mean.to_dict(), "std": self.std.to_dict()}
 
-    @classmethod
+    
     def from_dict(cls, data: Mapping[str, Mapping[str, float]]) -> "NormalizationStats":
         return cls(mean=pd.Series(data["mean"]), std=pd.Series(data["std"]))
 
@@ -101,27 +102,16 @@ class TrainValTestSplit:
     test: pd.DataFrame
 
 
-def load_dataframe(path: Path | str) -> pd.DataFrame:
-    """Load CSV or Parquet dataset into a DataFrame."""
-
-    resolved_path = _resolve_dataset_path(Path(path))
-    suffix = resolved_path.suffix.lower()
-    if suffix == ".csv":
-        return pd.read_csv(resolved_path)
-    if suffix in {".parquet", ".pq"}:
-        return pd.read_parquet(resolved_path)
-    raise ValueError(f"Unsupported dataset format '{resolved_path.suffix}'")
-
-
-def _resolve_dataset_path(candidate: Path) -> Path:
-    """Resolve dataset paths relative to the project root and common data folders."""
+#resolve dataset paths wurde mit chatgpt gemacht weil ich kein bock hatte sowas zu implementieren
+def resolve_dataset_path(candidate: Path) -> Path:
+    """Resolve dataset paths in bezug zum project root und den common data folders"""
 
     candidate = candidate.expanduser()
     if candidate.exists():
         return candidate.resolve()
 
     if candidate.is_absolute():
-        raise FileNotFoundError(f"Dataset path does not exist: {candidate}")
+        raise FileNotFoundError(f"Dataset path irgendwie falsch: {candidate}")
 
     direct = (_PROJECT_ROOT / candidate).resolve()
     if direct.exists():
@@ -167,46 +157,58 @@ def _resolve_dataset_path(candidate: Path) -> Path:
                 fuzzy_matches.sort(key=lambda p: (len(p.stem), p.stat().st_size if p.exists() else 0))
                 return fuzzy_matches[0].resolve()
 
-    raise FileNotFoundError(f"Dataset path does not exist: {candidate}")
+    raise FileNotFoundError(f"Dataset path gibts nicht: {candidate}")
+
+def load_dataframe(path: Path | str) -> pd.DataFrame:
+    """dataset in ein DataFrame reinloaden"""
+
+    resolved_path = resolve_dataset_path(Path(path))
+    suffix = resolved_path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(resolved_path)
+    if suffix in {".parquet", ".pq"}:
+        return pd.read_parquet(resolved_path)
+    raise ValueError(f"Datei Format nachgucken '{resolved_path.suffix}'")
+
 
 
 def split_dataframe(
     df: pd.DataFrame,
     *,
-    val_fraction: float = 0.1,
-    test_fraction: float = 0.1,
-    seed: int = 42,
+    val_fraction: float = 0.1, # portion of data for validation set
+    test_fraction: float = 0.1, # portion of data for test set
+    seed: int = 42, # random seed for reproducibility
 ) -> TrainValTestSplit:
     """Deterministic random split for train/val/test portions."""
 
-    if val_fraction < 0 or test_fraction < 0 or val_fraction + test_fraction >= 1.0:
-        raise ValueError("Invalid validation/test fractions.")
+    if val_fraction < 0 or test_fraction < 0 or val_fraction + test_fraction >= 1.0: 
+        raise ValueError("werte iwie falsch") # Keine der Anteile darf negativ sein; Zusammen dürfen sie nicht ≥ 1 sein, weil sonst kein Platz mehr für Training bleibt
 
-    df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True) # shuffle dataframe rows, damit die splits random sind Das ist wichtig und damit beim Split später die Reihenfolge keine Rolle spielt
     n = len(df)
-    n_test = int(n * test_fraction)
-    n_val = int(n * val_fraction)
+    n_test = int(n * test_fraction) #anzahl der zeilen für testsatz
+    n_val = int(n * val_fraction) #anzahl der zeilen für validierungssatz
 
-    test_df = df.iloc[:n_test].reset_index(drop=True)
-    val_df = df.iloc[n_test : n_test + n_val].reset_index(drop=True)
-    train_df = df.iloc[n_test + n_val :].reset_index(drop=True)
-    return TrainValTestSplit(train=train_df, val=val_df, test=test_df)
+    test_df = df.iloc[:n_test].reset_index(drop=True) #test datensatz
+    val_df = df.iloc[n_test : n_test + n_val].reset_index(drop=True) #validierungs datensatz
+    train_df = df.iloc[n_test + n_val :].reset_index(drop=True) #train datensatz
+    return TrainValTestSplit(train=train_df, val=val_df, test=test_df)  #return the splits
 
 
-def compute_normalization(df: pd.DataFrame, target_cols: Sequence[str]) -> NormalizationStats:
+def compute_normalization(df: pd.DataFrame, target_cols: Sequence[str]) -> NormalizationStats: #rechnet mean und std für columns aus
     if len(target_cols) == 0:
-        raise ValueError("At least one target column required for normalisation.")
+        raise ValueError("du brauchst mehr als ein target column um normalisierung zu machen")
     mean = df[target_cols].mean()
     std = df[target_cols].std().replace(0, 1.0)
     return NormalizationStats(mean=mean, std=std)
 
 
-def apply_normalization(df: pd.DataFrame, stats: NormalizationStats, target_cols: Sequence[str]) -> pd.DataFrame:
+def apply_normalization(df: pd.DataFrame, stats: NormalizationStats, target_cols: Sequence[str]) -> pd.DataFrame: #apply normalisierung auf dataframe
     return stats.transform(df, target_cols)
 
 
-def create_property_dataset(df: pd.DataFrame, *, cache_graphs: bool = False):
-    """Convert dataframe into a PyG dataset using ``mol_to_graph``."""
+def create_property_dataset(df: pd.DataFrame, *, cache_graphs: bool = False): 
+    """Convert dataframe into a PyG dataset mit ``mol_to_graph`` aus src.featurization.""" 
 
     target_cols = [c for c in df.columns if c not in {"smiles", "id"}]
     graphs = []
@@ -214,6 +216,29 @@ def create_property_dataset(df: pd.DataFrame, *, cache_graphs: bool = False):
         y = row[target_cols].values.astype(float) if target_cols else None
         data = mol_to_graph(row["smiles"], y=y)
         graphs.append(data)
+        #Hier passiert der Hauptteil: 
+
+        #Iteration über jede Zeile im DataFrame
+        #→ row["smiles"] ist ein Molekülstring.
+
+        #Zielwerte extrahieren
+       # →  y enthält die Zielgrößen als numpy.float-Array.
+
+        ##Molekül in Graph umwandeln
+        #→ mol_to_graph() ist eine Funktion (aus src.featurization),
+        #die den SMILES-String in ein PyG Data-Objekt umwandelt:
+
+        #Knoten = Atome
+
+        #Kanten = Bindungen
+
+        #Features = atomare und chemische Eigenschaften
+
+        #y = Zielwert(e) für das Molekül
+
+        #Graph speichern
+        # → Der Graph wird der Liste graphs hinzugefügt.
+
     if not cache_graphs:
         # return lazy dataset to avoid storing all Data objects at once
         from src.models.mpnn import MoleculeDataset  # local import to avoid circular on module load
@@ -244,5 +269,3 @@ def build_pyg_dataloaders(
         "test": PyGDataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers),
     }
     return loaders
-if __name__ == "__main__":
-    to_dict = NormalizationStats(pd.Series({'a': 1.0, 'b': 2.0}), pd.Series({'a': 0.5, 'b': 1.5})).to_dict()    

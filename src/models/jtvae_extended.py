@@ -76,6 +76,8 @@ try:
 except Exception:
     RDKit_AVAILABLE = False
 
+from src.utils.device import ensure_state_dict_on_cpu, get_device, move_to_device
+
 # -------------------------
 # Fragmentation utilities (very simplified)
 # -------------------------
@@ -226,19 +228,22 @@ class JTVAE(nn.Module):
         return frags_logits, node_feats, mu, logvar
 
     def sample(self, n_samples=32, cond=None, max_tree_nodes=12, fragment_idx_to_smiles=None, device=None):
-        device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-        z = torch.randn(n_samples, self.z_dim, device=device)
+        device_spec = get_device(device)
+        target = device_spec.target
+        z = torch.randn(n_samples, self.z_dim, device=target)
+        cond_t = None
         if cond is not None:
-            # expand cond if scalar or 1D vector
-            if isinstance(cond, np.ndarray):
-                cond_t = torch.tensor(cond, dtype=torch.float, device=device).unsqueeze(0)
-                cond_t = cond_t.repeat(n_samples, 1)
-            elif torch.is_tensor(cond):
-                cond_t = cond.repeat(n_samples, 1).to(device)
+            if torch.is_tensor(cond):
+                cond_t = cond
             else:
-                cond_t = None
-        else:
-            cond_t = None
+                cond_np = cond if isinstance(cond, np.ndarray) else np.asarray(cond, dtype=np.float32)
+                cond_t = torch.from_numpy(np.atleast_1d(cond_np)).float()
+            if cond_t.dim() == 0:
+                cond_t = cond_t.view(1, 1)
+            elif cond_t.dim() == 1:
+                cond_t = cond_t.unsqueeze(0)
+            cond_t = cond_t.repeat(n_samples, 1)
+            cond_t = cond_t.to(target)
         frags_logits, node_feats = self.decoder(z, max_tree_nodes=max_tree_nodes, cond=cond_t)
         # convert top-k fragment indices into SMILES via fragment_idx_to_smiles dict
         samples = []
@@ -285,8 +290,8 @@ def jtvae_loss(frags_logits, node_feats, mu, logvar, target_frag_idxs=None, beta
 def train_jtvae(model: JTVAE, dataset, fragment_vocab: Dict[int,str], device: str = None,
                 epochs: int = 100, batch_size: int = 16, lr: float = 1e-3, save_dir: str = './jtvae_models'):
     os.makedirs(save_dir, exist_ok=True)
-    device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
-    model.to(device)
+    device_spec = get_device(device)
+    model.to(device_spec.target)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     # dataset should provide precomputed: tree_x, tree_edge_index, graph_x, graph_edge_index, target_frag_idxs, cond
@@ -296,7 +301,7 @@ def train_jtvae(model: JTVAE, dataset, fragment_vocab: Dict[int,str], device: st
         epoch_loss = 0.0
         for batch in loader:
             # batch must contain fields as described above
-            batch = batch.to(device)
+            batch = move_to_device(batch, device_spec)
             cond = batch.cond if hasattr(batch, 'cond') else None
             target_frag_idxs = batch.target_frag_idxs if hasattr(batch, 'target_frag_idxs') else None
             frags_logits, node_feats, mu, logvar = model(batch.tree_x, batch.tree_edge_index, batch.graph_x, batch.graph_edge_index,
@@ -309,7 +314,7 @@ def train_jtvae(model: JTVAE, dataset, fragment_vocab: Dict[int,str], device: st
             opt.step()
             epoch_loss += loss.item() * batch.num_graphs
         print(f"Epoch {epoch:03d} Loss: {epoch_loss/len(dataset):.4f}")
-        torch.save(model.state_dict(), os.path.join(save_dir, f'jtvae_epoch_{epoch}.pt'))
+        torch.save(ensure_state_dict_on_cpu(model, device_spec), os.path.join(save_dir, f'jtvae_epoch_{epoch}.pt'))
     return model
 
 # -------------------------
