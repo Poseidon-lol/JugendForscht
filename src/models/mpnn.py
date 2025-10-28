@@ -26,6 +26,7 @@ import random
 from typing import List, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -152,8 +153,11 @@ class MoleculeDataset(PyGDataset):
         """Expects a pandas DataFrame with columns: 'smiles' and target columns (e.g. 'HOMO','LUMO')."""
         super().__init__(None, transform, pre_transform)
         self.df = dataframe.reset_index(drop=True)
-        # infer target columns
-        self.target_cols = [c for c in self.df.columns if c not in ('smiles', 'id')]
+        # infer numeric target columns (exclude identifier / string columns)
+        candidate_cols = [c for c in self.df.columns if c not in ("smiles", "id")]
+        self.target_cols = [
+            c for c in candidate_cols if pd.api.types.is_numeric_dtype(self.df[c])
+        ]
 
     def len(self):
         return len(self.df)

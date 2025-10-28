@@ -1,6 +1,6 @@
 """
 Data loading helpers for surrogate and generative models.
-=========================================================
+
 
 The project works primarily with CSV/Parquet files that contain SMILES rows
 and target properties (HOMO/LUMO, electron affinity, ionisation energy,
@@ -76,11 +76,10 @@ class NormalizationStats:
     mean: pd.Series
     std: pd.Series
 
-    @classmethod
     def to_dict(self) -> Dict[str, Dict[str, float]]:
         return {"mean": self.mean.to_dict(), "std": self.std.to_dict()}
 
-    
+    @classmethod
     def from_dict(cls, data: Mapping[str, Mapping[str, float]]) -> "NormalizationStats":
         return cls(mean=pd.Series(data["mean"]), std=pd.Series(data["std"]))
 

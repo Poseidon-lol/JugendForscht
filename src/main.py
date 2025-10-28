@@ -5,7 +5,7 @@ import argparse
 import logging
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 
 import pandas as pd
 import torch
@@ -21,15 +21,13 @@ else:
     raise RuntimeError("Could not locate project root containing src/")
 
 
-from src.active_learn.loop import ActiveLearningLoop, LoopConfig
-from src.active_learn.acq import AcquisitionConfig
-from src.active_learn.sched import SchedulerConfig
 from src.data.dataset import load_dataframe, split_dataframe
-from src.data.jt_preprocess import JTPreprocessConfig, build_fragment_vocab, prepare_jtvae_examples
 from src.models.ensemble import EnsembleConfig, SurrogateEnsemble
-from src.models.jtvae_extended import JTVAE, JTVDataset, train_jtvae
 from src.utils.config import load_config
 from src.utils.log import setup_logging
+
+if TYPE_CHECKING:
+    from src.models.jtvae_extended import JTVAE, JTVDataset
 
 
 def train_surrogate(args: argparse.Namespace) -> None:
@@ -56,6 +54,8 @@ def train_surrogate(args: argparse.Namespace) -> None:
 
 
 def _load_jtvae_from_ckpt(ckpt: Path, fragment_vocab_size: int, cond_dim: int) -> JTVAE:
+    from src.models.jtvae_extended import JTVAE
+
     state = torch.load(ckpt, map_location="cpu")
     hidden_dim = state["encoder.tree_encoder.input_proj.weight"].shape[0]
     node_feat_dim = state["encoder.tree_encoder.input_proj.weight"].shape[1]
@@ -72,31 +72,35 @@ def _load_jtvae_from_ckpt(ckpt: Path, fragment_vocab_size: int, cond_dim: int) -
 
 
 def train_generator(args: argparse.Namespace) -> None:
+    from src.data.jt_preprocess import JTPreprocessConfig, build_fragment_vocab, prepare_jtvae_examples
+    from src.models.jtvae_extended import JTVAE, JTVDataset, train_jtvae
+
     cfg = load_config(args.config)
     data_cfg = cfg.dataset
     df = pd.read_csv(data_cfg.path)
-    fragment_vocab = build_fragment_vocab(df["smiles"], min_freq=1)
+    frag2idx, idx2frag = build_fragment_vocab(df["smiles"], min_count=1)
     cond_cols = cfg.dataset.target_columns
+    jt_config = JTPreprocessConfig(
+        max_fragments=cfg.dataset.max_fragments,
+        condition_columns=cond_cols,
+    )
     examples = prepare_jtvae_examples(
         df,
-        fragment_vocab,
-        config=JTPreprocessConfig(
-            max_fragments=cfg.dataset.max_fragments,
-            condition_columns=cond_cols,
-        ),
+        frag2idx,
+        config=jt_config,
     )
     dataset = JTVDataset(examples)
     model = JTVAE(
         node_feat_dim=examples[0]["graph_x"].size(1),
-        fragment_vocab_size=len(fragment_vocab),
+        fragment_vocab_size=len(frag2idx),
         z_dim=cfg.model.z_dim,
         hidden_dim=cfg.model.hidden_dim,
-        cond_dim=cfg.model.cond_dim,
+        cond_dim=len(cond_cols) if cfg.model.cond_dim is None else cfg.model.cond_dim,
     )
     train_jtvae(
         model,
         dataset,
-        fragment_vocab,
+        frag2idx,
         epochs=cfg.training.epochs,
         batch_size=cfg.training.batch_size,
         lr=cfg.training.lr,
@@ -105,11 +109,20 @@ def train_generator(args: argparse.Namespace) -> None:
     vocab_path = Path(cfg.save_dir) / "fragment_vocab.json"
     vocab_path.parent.mkdir(parents=True, exist_ok=True)
     with vocab_path.open("w", encoding="utf-8") as f:
-        json.dump(fragment_vocab, f, indent=2)
+        json.dump(idx2frag, f, indent=2)
+    if jt_config.condition_stats:
+        stats_path = Path(cfg.save_dir) / "condition_stats.json"
+        with stats_path.open("w", encoding="utf-8") as f:
+            json.dump(jt_config.condition_stats, f, indent=2)
     print(f"Generator checkpoints and vocab saved to {cfg.save_dir}")
 
 
 def run_active_loop(args: argparse.Namespace) -> None:
+    from src.active_learn.acq import AcquisitionConfig
+    from src.active_learn.loop import ActiveLearningLoop, LoopConfig
+    from src.active_learn.sched import SchedulerConfig
+    from src.models.jtvae_extended import JTVAE
+
     cfg = load_config(args.config)
     acq_cfg = AcquisitionConfig(**cfg.acquisition)
     sched_cfg = SchedulerConfig(**cfg.scheduler)

@@ -1,5 +1,5 @@
 dataset:
-  path: data/jtvae_training.csv
+  path: data/raw/qm9_dataset.csv
   target_columns: [HOMO, LUMO]
   max_fragments: 12
 model:

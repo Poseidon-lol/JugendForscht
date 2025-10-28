@@ -74,8 +74,12 @@ def mol_to_graph(smiles: str, y=None):
         edge_index += [[i, j], [j, i]]
         edge_attr += [bf, bf]
 
-    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-    edge_attr = torch.stack(edge_attr)
+    if edge_index:
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_attr = torch.stack(edge_attr)
+    else:
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+        edge_attr = torch.empty((0, len(BOND_TYPES)), dtype=torch.float)
 
     # --- target (optional) ---
     y_tensor = None

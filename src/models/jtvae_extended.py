@@ -317,6 +317,60 @@ def train_jtvae(model: JTVAE, dataset, fragment_vocab: Dict[int,str], device: st
         torch.save(ensure_state_dict_on_cpu(model, device_spec), os.path.join(save_dir, f'jtvae_epoch_{epoch}.pt'))
     return model
 
+
+def sample_conditional(
+    model: JTVAE,
+    fragment_vocab: Dict[str, int],
+    *,
+    cond: Optional[np.ndarray] = None,
+    n_samples: int = 32,
+    assembler: str = "beam",
+    assemble_kwargs: Optional[Dict] = None,
+) -> List[Dict[str, str]]:
+    """Convenience wrapper that converts JT-VAE samples into dicts with SMILES strings.
+
+    Parameters
+    ----------
+    model:
+        Trained JTVAE instance.
+    fragment_vocab:
+        Mapping from fragment SMILES to integer indices.
+    cond:
+        Optional conditioning vector (e.g. normalised properties).
+    n_samples:
+        Number of candidate molecules to sample.
+    assembler:
+        Currently unused placeholder to keep API compatibility with future assemblers.
+    assemble_kwargs:
+        Optional overrides, e.g. ``{"max_tree_nodes": 16}``.
+    """
+
+    del assembler  # placeholder for compatibility
+
+    if assemble_kwargs is None:
+        assemble_kwargs = {}
+
+    max_tree_nodes = assemble_kwargs.get("max_tree_nodes", 12)
+    idx_to_frag = {idx: frag for frag, idx in fragment_vocab.items()}
+
+    raw_samples = model.sample(
+        n_samples=n_samples,
+        cond=cond,
+        max_tree_nodes=max_tree_nodes,
+        fragment_idx_to_smiles=idx_to_frag,
+    )
+
+    formatted: List[Dict[str, str]] = []
+    for entry in raw_samples:
+        if isinstance(entry, str):
+            smiles = entry
+        elif isinstance(entry, (list, tuple)):
+            smiles = "".join(entry)
+        else:
+            smiles = str(entry)
+        formatted.append({"smiles": smiles})
+    return formatted
+
 # -------------------------
 # Dataset adapter for JT-VAE
 # -------------------------

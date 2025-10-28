@@ -41,6 +41,8 @@ import os
 import json
 import argparse
 from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -50,6 +52,11 @@ from tqdm import tqdm
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 from rdkit.Chem import AllChem
+try:
+    from rdkit.Chem import rdFingerprintGenerator
+except ImportError:  # pragma: no cover - older RDKit versions
+    rdFingerprintGenerator = None
+from rdkit import DataStructs
 from pathlib import Path
 import sys
 
@@ -97,13 +104,33 @@ def extract_fragments(smiles: str):
     return list(frags)
 
 
+_MORGAN_GENERATORS: Dict[Tuple[int, int], object] = {}
+
+
+def _get_morgan_generator(radius: int, n_bits: int):
+    if rdFingerprintGenerator is None:
+        return None
+    key = (radius, n_bits)
+    if key not in _MORGAN_GENERATORS:
+        _MORGAN_GENERATORS[key] = rdFingerprintGenerator.GetMorganGenerator(
+            radius=radius,
+            fpSize=n_bits,
+            includeChirality=True,
+        )
+    return _MORGAN_GENERATORS[key]
+
+
 def frag_to_fp_vector(frag_smiles: str, n_bits=512):
     mol = Chem.MolFromSmiles(frag_smiles)
     if mol is None:
         return np.zeros(n_bits, dtype=np.float32)
-    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=n_bits)
+    generator = _get_morgan_generator(radius=2, n_bits=n_bits)
+    if generator is not None:
+        fp = generator.GetFingerprint(mol)
+    else:  # fallback for older RDKit versions
+        fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=n_bits)
     arr = np.zeros((n_bits,), dtype=np.float32)
-    AllChem.DataStructs.ConvertToNumpyArray(fp, arr)
+    DataStructs.ConvertToNumpyArray(fp, arr)
     return arr
 
 
@@ -111,7 +138,17 @@ def frag_to_fp_vector(frag_smiles: str, n_bits=512):
 # Build fragment vocab across dataset
 # -------------------------
 
-def build_fragment_vocab(smiles_list, min_count=1):
+@dataclass
+class JTPreprocessConfig:
+    max_fragments: int = 12
+    fp_bits: int = 512
+    condition_columns: Sequence[str] = ("HOMO", "LUMO")
+    normalise_conditions: bool = True
+    min_fragment_frequency: int = 1
+    condition_stats: Dict[str, List[float]] = field(default_factory=dict)
+
+
+def build_fragment_vocab(smiles_list: Iterable[str], min_count: int = 1) -> Tuple[Dict[str, int], Dict[int, str]]:
     counter = defaultdict(int)
     for smi in smiles_list:
         frags = extract_fragments(smi)
@@ -171,11 +208,14 @@ def fragment_adjacency_from_mol(smiles: str, fragments: list):
     return edges, frag_atom_sets
 
 
-# -------------------------
-# Preprocess single molecule
-# -------------------------
-
-def process_one(smiles: str, homo: float, lumo: float, frag2idx: dict, max_frags: int = 12, fp_bits: int = 512):
+def process_one(
+    smiles: str,
+    cond_values: Sequence[float],
+    frag2idx: Mapping[str, int],
+    *,
+    max_frags: int = 12,
+    fp_bits: int = 512,
+) -> Dict[str, torch.Tensor | np.ndarray | str]:
     # 1) extract fragments for this mol
     frags = extract_fragments(smiles)
     # map to indices (filter unknown frags)
@@ -230,7 +270,7 @@ def process_one(smiles: str, homo: float, lumo: float, frag2idx: dict, max_frags
         'graph_x': atom_data.x,  # already torch tensors
         'graph_edge_index': atom_data.edge_index,
         'target_frag_idxs': torch.tensor(targ, dtype=torch.long),
-        'cond_raw': np.array([homo, lumo], dtype=np.float32),
+        'cond_raw': np.array(cond_values, dtype=np.float32),
         'smiles': smiles
     }
     return example
@@ -239,6 +279,80 @@ def process_one(smiles: str, homo: float, lumo: float, frag2idx: dict, max_frags
 # -------------------------
 # Full preprocessing
 # -------------------------
+
+def prepare_jtvae_examples(
+    df,
+    fragment_vocab,
+    *,
+    config: Optional[JTPreprocessConfig] = None,
+) -> List[Dict[str, torch.Tensor | np.ndarray | str]]:
+    """Convert dataframe rows into JT-VAE training examples.
+
+    Parameters
+    ----------
+    df:
+        pandas DataFrame with a ``smiles`` column and conditioning columns.
+    fragment_vocab:
+        Mapping ``fragment_smiles -> index`` or tuple ``(frag2idx, idx2frag)``
+        as returned by :func:`build_fragment_vocab`.
+    config:
+        Optional :class:`JTPreprocessConfig` controlling preprocessing hyper-parameters.
+    """
+
+    import pandas as pd
+
+    if config is None:
+        config = JTPreprocessConfig()
+
+    if isinstance(fragment_vocab, tuple):
+        frag2idx = fragment_vocab[0]
+    else:
+        frag2idx = fragment_vocab
+    if not isinstance(frag2idx, Mapping):
+        raise TypeError("fragment_vocab must be a mapping or (frag2idx, idx2frag) tuple.")
+
+    if "smiles" not in df.columns:
+        raise KeyError("Dataframe must contain a 'smiles' column.")
+
+    cond_cols = list(config.condition_columns)
+    missing = [c for c in cond_cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing conditioning columns: {missing}")
+
+    # ensure dataframe type
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+
+    cond_matrix = df[cond_cols].to_numpy(dtype=float)
+    cond_mean = cond_matrix.mean(axis=0)
+    cond_std = cond_matrix.std(axis=0)
+    cond_std = np.where(cond_std < 1e-8, 1.0, cond_std)
+
+    examples: List[Dict[str, torch.Tensor | np.ndarray | str]] = []
+    for row in df.itertuples(index=False):
+        smiles = getattr(row, "smiles")
+        cond_values = [float(getattr(row, col)) for col in cond_cols]
+        ex = process_one(
+            smiles,
+            cond_values,
+            frag2idx,
+            max_frags=config.max_fragments,
+            fp_bits=config.fp_bits,
+        )
+        if config.normalise_conditions:
+            norm = (ex["cond_raw"] - cond_mean) / cond_std
+        else:
+            norm = ex["cond_raw"]
+        ex["cond"] = torch.tensor(norm, dtype=torch.float32)
+        examples.append(ex)
+
+    config.condition_stats = {
+        "mean": cond_mean.tolist(),
+        "std": cond_std.tolist(),
+        "columns": cond_cols,
+    }
+    return examples
+
 
 def preprocess(input_csv: str, out_dir: str, max_frags: int = 12, fp_bits: int = 512):
     import pandas as pd
@@ -260,7 +374,8 @@ def preprocess(input_csv: str, out_dir: str, max_frags: int = 12, fp_bits: int =
     for _, row in tqdm(df.iterrows(), total=len(df)):
         smi = row['smiles']
         try:
-            ex = process_one(smi, float(row['HOMO']), float(row['LUMO']), frag2idx, max_frags=max_frags, fp_bits=fp_bits)
+            cond_vals = [float(row['HOMO']), float(row['LUMO'])]
+            ex = process_one(smi, cond_vals, frag2idx, max_frags=max_frags, fp_bits=fp_bits)
             examples.append(ex)
             conds.append(ex['cond_raw'])
         except Exception as e:

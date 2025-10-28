@@ -1,8 +1,9 @@
 dataset:
-  path: data/osc_train.csv
+  path: data/raw/qm9_dataset.csv
   target_columns: [HOMO, LUMO]
   val_fraction: 0.1
 surrogate:
+  device: directml
   n_models: 5
   epochs: 120
   batch_size: 64
