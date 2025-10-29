@@ -4,9 +4,23 @@ loop:
   maximise: [false, true]
   generator_samples: 32
   results_dir: experiments/active_runs
+  diversity_threshold: 0.85
+  generator_refresh:
+    epochs: 1
+    batch_size: 16
+    lr: 0.0001
+    kl_weight: 0.5
+    property_weight: 0.1
+    adj_weight: 1.0
+    save_dir: experiments/generator_refresh
+assemble:
+  beam_width: 5
+  topk_per_node: 5
+  adjacency_threshold: 0.6
 acquisition:
-  kind: ucb
+  kind: pareto_ucb
   beta: 1.5
+  maximise: [true, true]
 scheduler:
   max_iterations: 20
   surrogate_retrain_every: 1

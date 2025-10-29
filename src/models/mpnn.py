@@ -48,7 +48,7 @@ else:
 # PyG imports
 try:
     from torch_geometric.data import Data, Dataset as PyGDataset
-    from torch_geometric.nn import MessagePassing, global_mean_pool
+    from torch_geometric.nn import MessagePassing, global_add_pool, global_max_pool, global_mean_pool
     from torch_geometric.loader import DataLoader as PyGDataLoader
 except Exception as e:
     raise ImportError("This module requires torch_geometric. Install it before using MPModel.")
@@ -66,38 +66,48 @@ from src.utils.device import DeviceSpec, ensure_state_dict_on_cpu, get_device, m
 # -----------------------------
 # MPNN building blocks
 # -----------------------------
-class SimpleMPNNLayer(MessagePassing):
-    def __init__(self, node_dim: int, edge_dim: int, out_dim: int):
-        super().__init__(aggr='add')  # aggregate messages by summation
-        self.msg_mlp = nn.Sequential(
-            nn.Linear(2 * node_dim + edge_dim, out_dim),
+class ResidualEdgeGatedMPNNLayer(MessagePassing):
+    """Edge-gated message passing with residual connections and layer norm."""
+
+    def __init__(self, hidden_dim: int, dropout: float = 0.0):
+        super().__init__(aggr="add")
+        self.hidden_dim = hidden_dim
+        self.dropout = float(dropout)
+
+        self.msg_proj = nn.Sequential(
+            nn.Linear(2 * hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(out_dim, out_dim),
-            nn.ReLU()
+            nn.Linear(hidden_dim, hidden_dim),
         )
-        self.update_mlp = nn.Sequential(
-            nn.Linear(node_dim + out_dim, out_dim),
-            nn.ReLU()
+        self.gate_proj = nn.Sequential(
+            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.Sigmoid(),
         )
+        self.residual_mlp = nn.Sequential(
+            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.dropout_layer = nn.Dropout(self.dropout) if self.dropout > 0 else nn.Identity()
 
     def forward(self, x, edge_index, edge_attr):
-        # x: [N, node_dim], edge_attr: [E, edge_dim]
-        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+        out = self.propagate(edge_index, x=x, edge_attr=edge_attr)
+        combined = torch.cat([x, out], dim=-1)
+        residual = self.residual_mlp(combined)
+        residual = self.dropout_layer(residual)
+        return self.layer_norm(x + residual)
 
-    def message(self, x_i, x_j, edge_attr):
-        # x_i: target node embedding, x_j: source node embedding
-        m = torch.cat([x_i, x_j, edge_attr], dim=-1)
-        return self.msg_mlp(m)
-
-    def update(self, aggr_out, x):
-        u = torch.cat([x, aggr_out], dim=-1)
-        return self.update_mlp(u)
+    def message(self, x_j, edge_attr):
+        concat = torch.cat([x_j, edge_attr], dim=-1)
+        gated = self.gate_proj(concat) * self.msg_proj(concat)
+        return gated
 
 
 class MPModel(nn.Module):
     def __init__(self, node_in_dim: int, edge_in_dim: int, hidden_dim: int = 128,
                  num_message_layers: int = 3, readout_dim: int = 128, out_dim: int = 2,
-                 dropout: float = 0.0):
+                 dropout: float = 0.0, readout_type: str = "mlp", pooling: str = "mean"):
         """A small MPNN for regression.
 
         Args:
@@ -112,17 +122,28 @@ class MPModel(nn.Module):
         super().__init__()
         self.node_encoder = nn.Linear(node_in_dim, hidden_dim)
         self.edge_encoder = nn.Linear(edge_in_dim, hidden_dim)
+        self.node_norm = nn.LayerNorm(hidden_dim)
+        self.edge_norm = nn.LayerNorm(hidden_dim)
         self.dropout = float(dropout)
+        self.pooling = pooling.lower()
+        valid_poolings = {"mean", "sum", "max"}
+        if self.pooling not in valid_poolings:
+            raise ValueError(f"Unknown pooling '{pooling}'. Choose from {valid_poolings}.")
 
-        self.layers = nn.ModuleList([
-            SimpleMPNNLayer(hidden_dim, hidden_dim, hidden_dim) for _ in range(num_message_layers)
-        ])
-
-        self.readout = nn.Sequential(
-            nn.Linear(hidden_dim, readout_dim),
-            nn.ReLU(),
-            nn.Linear(readout_dim, out_dim)
+        self.layers = nn.ModuleList(
+            ResidualEdgeGatedMPNNLayer(hidden_dim, dropout=self.dropout) for _ in range(num_message_layers)
         )
+
+        if readout_type.lower() == "mlp":
+            self.readout = nn.Sequential(
+                nn.Linear(hidden_dim, readout_dim),
+                nn.ReLU(),
+                nn.Linear(readout_dim, out_dim),
+            )
+        elif readout_type.lower() == "linear":
+            self.readout = nn.Linear(hidden_dim, out_dim)
+        else:
+            raise ValueError("Unsupported readout_type '{}'. Use 'mlp' or 'linear'.".format(readout_type))
 
     def forward(self, data: Data):
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, None
@@ -131,16 +152,19 @@ class MPModel(nn.Module):
         else:
             batch = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
 
-        x = self.node_encoder(x)
-        edge_attr = self.edge_encoder(edge_attr)
+        x = self.node_norm(self.node_encoder(x))
+        edge_attr = self.edge_norm(self.edge_encoder(edge_attr))
 
         for layer in self.layers:
             x = layer(x, edge_index, edge_attr)
-            if self.dropout > 0.0:
-                x = F.dropout(x, p=self.dropout, training=self.training)
 
         # global pooling
-        g = global_mean_pool(x, batch)
+        if self.pooling == "mean":
+            g = global_mean_pool(x, batch)
+        elif self.pooling == "sum":
+            g = global_add_pool(x, batch)
+        else:  # max
+            g = global_max_pool(x, batch)
         out = self.readout(g)
         return out
 
@@ -175,8 +199,15 @@ class MoleculeDataset(PyGDataset):
 # Training & evaluation utilities
 # -----------------------------
 
-def train_one(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optimizer,
-              device: DeviceSpec | torch.device | str, loss_fn=None):
+def train_one(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: DeviceSpec | torch.device | str,
+    *,
+    loss_fn=None,
+    grad_clip: float = 0.0,
+):
     device_spec = get_device(device)
     target = device_spec.target
     model.train()
@@ -191,6 +222,8 @@ def train_one(model: nn.Module, loader: DataLoader, optimizer: torch.optim.Optim
         else:
             loss = loss_fn(pred, y)
         loss.backward()
+        if grad_clip and grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
         total_loss += loss.item() * pred.size(0)
     return total_loss / len(loader.dataset)
@@ -269,7 +302,7 @@ def train_ensemble(df, model_save_dir: str, n_models: int = 5, epochs: int = 50,
 
         best_val = 1e9
         for epoch in range(1, epochs + 1):
-            train_loss = train_one(model, train_loader, optimizer, device_spec, loss_fn=loss_fn)
+            train_loss = train_one(model, train_loader, optimizer, device_spec, loss_fn=loss_fn, grad_clip=0.0)
             val_mae, _, _ = evaluate(model, val_loader, device_spec, loss_fn=loss_fn)
             if val_mae < best_val:
                 best_val = val_mae

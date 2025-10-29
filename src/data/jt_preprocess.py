@@ -253,10 +253,23 @@ def process_one(
     real_frags = [idx2frag[idx] for idx in frag_idxs]
     edges, frag_atom_sets = fragment_adjacency_from_mol(smiles, real_frags)
     if len(edges) == 0:
-        # create trivial self-loop
-        edge_index = np.array([[0,0]], dtype=np.int64).T
+        edge_index = np.array([[0, 0]], dtype=np.int64).T
     else:
         edge_index = np.array(edges, dtype=np.int64).T
+
+    # adjacency matrix (symmetric)
+    adj = np.zeros((max_frags, max_frags), dtype=np.float32)
+    num_real = len(frag_idxs)
+    if num_real > 0:
+        if edge_index.size > 0:
+            src, dst = edge_index
+            valid_mask = (src < num_real) & (dst < num_real)
+            src = src[valid_mask]
+            dst = dst[valid_mask]
+            adj[src, dst] = 1.0
+        # ensure symmetry
+        adj = np.maximum(adj, adj.T)
+        np.fill_diagonal(adj[:num_real, :num_real], 0.0)
 
     # pad edge_index if necessary (not required for PyG)
 
@@ -271,6 +284,7 @@ def process_one(
         'graph_edge_index': atom_data.edge_index,
         'target_frag_idxs': torch.tensor(targ, dtype=torch.long),
         'cond_raw': np.array(cond_values, dtype=np.float32),
+        'tree_adj': torch.tensor(adj, dtype=torch.float32),
         'smiles': smiles
     }
     return example

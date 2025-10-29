@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -45,11 +46,17 @@ class EnsembleConfig:
     lr: float = 1e-3
     weight_decay: float = 1e-4
     patience: int = 20
+    scheduler_patience: int = 15
     loss: str = "mae"
     dropout: float = 0.0
     hidden_dim: int = 128
     message_layers: int = 3
     readout_dim: int = 128
+    readout: str = "mlp"
+    pooling: str = "mean"
+    grad_clip: float = 0.0
+    mc_dropout_samples: int = 0
+    calibrate: bool = True
     save_dir: Path = Path("models/surrogate")
     device: Optional[str] = "cpu"
     seed: int = 1337
@@ -82,6 +89,8 @@ class SurrogateEnsemble:
         self._members: List[torch.nn.Module] = []
         self._member_states: List[Dict[str, torch.Tensor]] = []
         self._member_scores: List[float] = []
+        self.temperature_: float = 1.0
+        self._metrics: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Training
@@ -134,16 +143,35 @@ class SurrogateEnsemble:
 
             optimizer = torch.optim.Adam(model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
             loss_fn = self._resolve_loss()
+            scheduler = None
+            if val_loader is not None:
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    mode="min",
+                    patience=self.config.scheduler_patience,
+                    factor=0.5,
+                    min_lr=max(self.config.lr * 1e-3, 1e-6),
+                    verbose=False,
+                )
 
             best_state: Optional[Dict[str, torch.Tensor]] = None
             best_val = float("inf")
             epochs_without_improve = 0
 
             for epoch in range(1, self.config.epochs + 1):
-                train_loss = train_one(model, train_loader, optimizer, self.device, loss_fn=loss_fn)
+                train_loss = train_one(
+                    model,
+                    train_loader,
+                    optimizer,
+                    self.device,
+                    loss_fn=loss_fn,
+                    grad_clip=self.config.grad_clip,
+                )
                 val_metric = train_loss
                 if val_loader is not None:
                     val_metric, _, _ = evaluate(model, val_loader, self.device, loss_fn=loss_fn)
+                    if scheduler is not None:
+                        scheduler.step(val_metric)
 
                 improved = val_metric < best_val - 1e-6
                 if improved or best_state is None:
@@ -155,11 +183,12 @@ class SurrogateEnsemble:
 
                 if epoch % 10 == 0 or epoch == 1:
                     logger.info(
-                        "Member %d epoch %03d train_loss=%.4f val_metric=%.4f",
+                        "Member %d epoch %03d train_loss=%.4f val_metric=%.4f lr=%.3e",
                         idx + 1,
                         epoch,
                         train_loss,
                         val_metric,
+                        optimizer.param_groups[0]["lr"],
                     )
 
                 if self.config.patience and epochs_without_improve >= self.config.patience:
@@ -184,6 +213,19 @@ class SurrogateEnsemble:
 
         logger.info("Finished training %d surrogate members.", len(self._members))
 
+        if val_dataset is not None:
+            if self.config.calibrate:
+                self._calibrate_temperature(val_dataset)
+            self._metrics = self._evaluate_metrics(val_dataset)
+            if self._metrics:
+                logger.info(
+                    "Validation metrics after calibration: %s",
+                    ", ".join(f"{k}={v:.4f}" for k, v in self._metrics.items()),
+                )
+        else:
+            self.temperature_ = 1.0
+            self._metrics = {}
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -206,6 +248,8 @@ class SurrogateEnsemble:
             "edge_dim": self.edge_dim,
             "out_dim": self.out_dim,
             "member_scores": self._member_scores,
+            "temperature": self.temperature_,
+            "validation_metrics": self._metrics,
         }
         meta_path = target_dir / META_FILENAME
         with meta_path.open("w", encoding="utf-8") as fh:
@@ -250,36 +294,67 @@ class SurrogateEnsemble:
         *,
         batch_size: Optional[int] = None,
         return_member_predictions: bool = False,
+        mc_dropout_samples: Optional[int] = None,
+        temperature: Optional[float] = None,
     ):
         """Predict mean/std across ensemble for PyG Data objects.
 
         When ``return_member_predictions`` is ``True`` the third element is the
-        raw predictions with shape ``[n_members, n_samples, out_dim]``.
+        raw predictions with shape ``[n_members, n_passes, n_samples, out_dim]``.
         """
 
         if not self._members:
             raise RuntimeError("Surrogate ensemble has no loaded members.")
 
+        if not isinstance(graphs, (list, tuple)):
+            if hasattr(graphs, "__len__") and hasattr(graphs, "__getitem__"):
+                graphs = [graphs[i] for i in range(len(graphs))]
+            else:
+                graphs = list(graphs)
+
+        if len(graphs) == 0:
+            raise ValueError("No graph examples supplied to predict().")
+
         effective_batch = batch_size or self.config.batch_size
-        preds_collect: List[np.ndarray] = []
+        dropout_passes = mc_dropout_samples
+        if dropout_passes is None:
+            dropout_passes = self.config.mc_dropout_samples
+        n_passes = max(1, int(dropout_passes or 0))
+
+        all_passes: List[np.ndarray] = []
+        member_passes: List[np.ndarray] = [] if return_member_predictions else []
 
         for member in self._members:
+            single_member_passes: List[np.ndarray] = []
+            for pass_idx in range(n_passes):
+                use_dropout = n_passes > 1 and getattr(member, "dropout", 0.0) > 0
+                if use_dropout:
+                    member.train()
+                else:
+                    member.eval()
+                loader = PyGDataLoader(graphs, batch_size=effective_batch, shuffle=False)
+                preds_batches: List[np.ndarray] = []
+                with torch.no_grad():
+                    for batch in loader:
+                        batch = move_to_device(batch, self.device)
+                        preds_batches.append(member(batch).detach().cpu().numpy())
+                single_member_passes.append(np.concatenate(preds_batches, axis=0))
             member.eval()
-            loader = PyGDataLoader(graphs, batch_size=effective_batch, shuffle=False)
-            member_preds: List[np.ndarray] = []
-            with torch.no_grad():
-                for batch in loader:
-                    batch = move_to_device(batch, self.device)
-                    out = member(batch)
-                    member_preds.append(out.detach().cpu().numpy())
-            preds_collect.append(np.concatenate(member_preds, axis=0))
+            member_stack = np.stack(single_member_passes, axis=0)
+            all_passes.append(member_stack)
+            if return_member_predictions:
+                member_passes.append(member_stack)
 
-        preds_stack = np.stack(preds_collect, axis=0)
+        preds_stack = np.concatenate(all_passes, axis=0)
         mean = preds_stack.mean(axis=0)
-        std = preds_stack.std(axis=0)
+        std = preds_stack.std(axis=0, ddof=1 if preds_stack.shape[0] > 1 else 0)
+        temp_scale = self.temperature_ if temperature is None else temperature
+        std = np.clip(std * temp_scale, a_min=1e-6, a_max=None)
+
         if return_member_predictions:
-            return mean, std, preds_stack
-        return mean, std
+            member_array = np.stack(member_passes, axis=0)
+            return mean, std, member_array
+        return mean, std, None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -295,6 +370,8 @@ class SurrogateEnsemble:
             readout_dim=self.config.readout_dim,
             out_dim=self.out_dim,
             dropout=self.config.dropout,
+            readout_type=self.config.readout,
+            pooling=self.config.pooling,
         )
 
     def _resolve_loss(self):
@@ -303,6 +380,61 @@ class SurrogateEnsemble:
         if self.config.loss.lower() == "mse":
             return torch.nn.MSELoss()
         raise ValueError(f"Unsupported loss function '{self.config.loss}'.")
+
+    def _calibrate_temperature(self, val_dataset: MoleculeDataset) -> None:
+        if len(val_dataset) == 0:
+            self.temperature_ = 1.0
+            return
+        targets = self._targets_from_dataset(val_dataset)
+        mean, std, _ = self.predict(
+            val_dataset,
+            batch_size=self.config.batch_size,
+            mc_dropout_samples=self.config.mc_dropout_samples,
+            temperature=1.0,
+        )
+        std = np.clip(std, 1e-6, None)
+        errors = (targets - mean) ** 2
+        scale = np.sqrt(np.mean(errors / (std**2)))
+        if not np.isfinite(scale):
+            scale = 1.0
+        self.temperature_ = float(np.clip(scale, 1e-3, 1e3))
+
+    def _evaluate_metrics(self, val_dataset: MoleculeDataset) -> Dict[str, float]:
+        if len(val_dataset) == 0:
+            return {}
+        targets = self._targets_from_dataset(val_dataset)
+        mean, std, _ = self.predict(
+            val_dataset,
+            batch_size=self.config.batch_size,
+            mc_dropout_samples=self.config.mc_dropout_samples,
+        )
+        mae = float(np.mean(np.abs(mean - targets)))
+        rmse = float(np.sqrt(np.mean((mean - targets) ** 2)))
+        nll = float(self._gaussian_nll(mean, std, targets))
+        crps = float(self._gaussian_crps(mean, std, targets))
+        return {"mae": mae, "rmse": rmse, "nll": nll, "crps": crps}
+
+    def _targets_from_dataset(self, dataset: MoleculeDataset) -> np.ndarray:
+        if not hasattr(dataset, "df"):
+            raise AttributeError("MoleculeDataset is expected to expose original dataframe via 'df'.")
+        return dataset.df[list(self.target_columns)].to_numpy(dtype=float)
+
+    @staticmethod
+    def _gaussian_nll(mean: np.ndarray, std: np.ndarray, target: np.ndarray) -> float:
+        var = np.clip(std**2, 1e-12, None)
+        nll = 0.5 * (((target - mean) ** 2) / var + np.log(var) + np.log(2 * math.pi))
+        return float(np.mean(nll))
+
+    @staticmethod
+    def _gaussian_crps(mean: np.ndarray, std: np.ndarray, target: np.ndarray) -> float:
+        std = np.clip(std, 1e-6, None)
+        z = (target - mean) / std
+        z_tensor = torch.from_numpy(z).float()
+        std_tensor = torch.from_numpy(std).float()
+        phi = torch.exp(-0.5 * z_tensor**2) / math.sqrt(2 * math.pi)
+        Phi = 0.5 * (1 + torch.erf(z_tensor / math.sqrt(2.0)))
+        crps = std_tensor * (z_tensor * (2 * Phi - 1) + 2 * phi - 1 / math.sqrt(math.pi))
+        return float(crps.mean().item())
 
     @staticmethod
     def _set_all_seeds(seed: int) -> None:
@@ -325,6 +457,12 @@ class SurrogateEnsemble:
         self.edge_dim = meta.get("edge_dim")
         self.out_dim = meta.get("out_dim")
         self._member_scores = meta.get("member_scores", [])
+        self.temperature_ = meta.get("temperature", 1.0)
+        metrics = meta.get("validation_metrics", {})
+        if isinstance(metrics, dict):
+            self._metrics = {k: float(v) for k, v in metrics.items()}
+        else:
+            self._metrics = {}
 
     def _load_members_from_directory(self, directory: Path) -> None:
         ckpts = sorted(directory.glob("mpnn_member_*.pt"))

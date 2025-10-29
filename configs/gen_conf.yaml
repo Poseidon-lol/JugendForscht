@@ -10,4 +10,6 @@ training:
   epochs: 80
   batch_size: 32
   lr: 0.001
+  kl_weight: 0.5
+  property_loss_weight: 0.1
 save_dir: models/generator

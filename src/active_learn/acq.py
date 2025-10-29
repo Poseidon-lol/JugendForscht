@@ -89,6 +89,13 @@ def acquisition_score(
     if config.kind == "ucb":
         scores = upper_confidence_bound(mean, std, beta=config.beta)
         return scores.mean(axis=1)
+    if config.kind == "multi_ucb":
+        scores = upper_confidence_bound(mean, std, beta=config.beta)
+        return scores.sum(axis=1)
+    if config.kind == "pareto_ucb":
+        scores = upper_confidence_bound(mean, std, beta=config.beta)
+        maximise = config.maximise if config.maximise is not None else [True] * scores.shape[1]
+        return pareto_rank(scores, maximise)
     if config.kind == "ei":
         if best_so_far is None:
             raise ValueError("best_so_far required for expected improvement.")

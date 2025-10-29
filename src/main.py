@@ -42,10 +42,20 @@ def train_surrogate(args: argparse.Namespace) -> None:
         batch_size=cfg.surrogate.batch_size,
         lr=cfg.surrogate.lr,
         weight_decay=cfg.surrogate.weight_decay,
-        patience=max(10, cfg.surrogate.epochs // 5),
+        patience=getattr(cfg.surrogate, "patience", max(10, cfg.surrogate.epochs // 5)),
+        scheduler_patience=getattr(cfg.surrogate, "scheduler_patience", 15),
         loss=cfg.surrogate.loss,
         dropout=cfg.surrogate.dropout,
+        hidden_dim=getattr(cfg.surrogate, "hidden_dim", 128),
+        message_layers=getattr(cfg.surrogate, "message_layers", 3),
+        readout_dim=getattr(cfg.surrogate, "readout_dim", getattr(cfg.surrogate, "hidden_dim", 128)),
+        readout=getattr(cfg.surrogate, "readout", "mlp"),
+        pooling=getattr(cfg.surrogate, "pooling", "mean"),
+        grad_clip=getattr(cfg.surrogate, "grad_clip", 0.0),
+        mc_dropout_samples=getattr(cfg.surrogate, "mc_dropout_samples", 0),
+        calibrate=getattr(cfg.surrogate, "calibrate", True),
         save_dir=Path(cfg.surrogate.save_dir),
+        device=getattr(cfg.surrogate, "device", None),
     )
     surrogate = SurrogateEnsemble(ens_cfg)
     surrogate.fit(split.train, split.val)
@@ -60,12 +70,19 @@ def _load_jtvae_from_ckpt(ckpt: Path, fragment_vocab_size: int, cond_dim: int) -
     hidden_dim = state["encoder.tree_encoder.input_proj.weight"].shape[0]
     node_feat_dim = state["encoder.tree_encoder.input_proj.weight"].shape[1]
     z_dim = state["encoder.fc_mu.weight"].shape[0]
+    positional_key = None
+    for key in state.keys():
+        if key.endswith("decoder.positional"):
+            positional_key = key
+            break
+    max_tree_nodes = state[positional_key].shape[0] if positional_key else 12
     model = JTVAE(
         node_feat_dim=node_feat_dim,
         fragment_vocab_size=fragment_vocab_size,
         z_dim=z_dim,
         hidden_dim=hidden_dim,
         cond_dim=cond_dim,
+        max_tree_nodes=max_tree_nodes,
     )
     model.load_state_dict(state)
     return model
@@ -90,13 +107,28 @@ def train_generator(args: argparse.Namespace) -> None:
         config=jt_config,
     )
     dataset = JTVDataset(examples)
+    cond_dim_value = len(cond_cols) if getattr(cfg.model, "cond_dim", None) is None else cfg.model.cond_dim
+    if cond_dim_value != len(cond_cols):
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "Configured cond_dim (%s) differs from number of condition columns (%s). "
+            "Using %s for property head.",
+            cond_dim_value,
+            len(cond_cols),
+            len(cond_cols),
+        )
+        cond_dim_value = len(cond_cols)
     model = JTVAE(
         node_feat_dim=examples[0]["graph_x"].size(1),
         fragment_vocab_size=len(frag2idx),
         z_dim=cfg.model.z_dim,
         hidden_dim=cfg.model.hidden_dim,
-        cond_dim=len(cond_cols) if cfg.model.cond_dim is None else cfg.model.cond_dim,
+        cond_dim=cond_dim_value,
+        max_tree_nodes=cfg.dataset.max_fragments,
     )
+    kl_weight = getattr(cfg.training, "kl_weight", 0.5)
+    property_weight = getattr(cfg.training, "property_loss_weight", 0.0)
+    adjacency_weight = getattr(cfg.training, "adjacency_loss_weight", 1.0)
     train_jtvae(
         model,
         dataset,
@@ -105,6 +137,9 @@ def train_generator(args: argparse.Namespace) -> None:
         batch_size=cfg.training.batch_size,
         lr=cfg.training.lr,
         save_dir=cfg.save_dir,
+        kl_weight=kl_weight,
+        property_weight=property_weight,
+        adj_weight=adjacency_weight,
     )
     vocab_path = Path(cfg.save_dir) / "fragment_vocab.json"
     vocab_path.parent.mkdir(parents=True, exist_ok=True)
