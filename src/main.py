@@ -35,6 +35,21 @@ def train_surrogate(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
     data_cfg = cfg.dataset
     df = load_dataframe(data_cfg.path)
+    target_columns = list(getattr(data_cfg, "target_columns", []))
+    if not target_columns:
+        raise ValueError("Config dataset.target_columns must list at least one property for surrogate training.")
+    missing = [col for col in target_columns if col not in df.columns]
+    if missing:
+        raise KeyError(f"Surrogate targets missing from dataframe: {missing}")
+    keep_cols = ["smiles"] + target_columns
+    df = df[keep_cols]
+    before = len(df)
+    df = df.dropna(subset=target_columns)
+    dropped = before - len(df)
+    if dropped > 0:
+        logging.getLogger(__name__).warning(
+            "Dropped %d rows with missing surrogate targets (remaining %d).", dropped, len(df)
+        )
     split = split_dataframe(df, val_fraction=data_cfg.val_fraction, test_fraction=0.0, seed=args.seed)
 
     ens_cfg = EnsembleConfig(
