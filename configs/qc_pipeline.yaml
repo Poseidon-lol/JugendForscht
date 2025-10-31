@@ -1,0 +1,25 @@
+geometry:
+  force_field: MMFF94
+  max_iterations: 500
+  embed_tries: 10
+  random_seed: 1337
+  optimize: true
+  use_etkdg: true
+quantum:
+  engine: orca
+  executable: "D:/Ackern/Orca/orca.exe"
+  method: B3LYP
+  basis: def2-SVP
+  level_of_theory: wb97xd/def2-SVP
+  dispersion: D3BJ
+  properties: [HOMO, LUMO, gap, IE, EA, lambda_hole, lambda_electron, dipole, polarizability, packing_score, stability_index]
+  charge: 0
+  multiplicity: 1
+  solvent_model: null
+max_workers: 4
+poll_interval: 5.0
+work_dir: qc_runs
+cleanup_workdir: false
+store_metadata: true
+
+

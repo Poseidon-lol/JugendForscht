@@ -1,0 +1,7 @@
+This download contains the OE62 dataset, a diverse benchmark spectroscopy dataset of around 62k large molecules extracted from organic crystals of the Cambridge Structural Database. 
+
+The content of this dataset is described in the associated publication: 
+
+Annika Stuke, Christian Kunkel, Dorothea Golze, Milica Todorovi, Johannes T. Margraf, Karsten Reuter, Patrick Rinkeand Harald Oberhofer: Atomic structures and orbital energies of 61,489 crystal-forming organic molecules.
+
+A tutorial file is also provided. In the tutorial, we explain the handling of the dataset in python, we recommend this as a starting point.

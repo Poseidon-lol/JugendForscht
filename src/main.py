@@ -1,9 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 import argparse
 import logging
 import json
+import yaml
 from pathlib import Path
 from typing import Dict, Optional, TYPE_CHECKING
 
@@ -169,6 +170,11 @@ def run_active_loop(args: argparse.Namespace) -> None:
         maximise=tuple(cfg.loop.maximise),
         generator_samples=cfg.loop.generator_samples,
         results_dir=Path(cfg.loop.results_dir),
+        assemble=dict(getattr(cfg, "assemble", {})),
+        diversity_threshold=float(getattr(cfg.loop, "diversity_threshold", 0.0)),
+        diversity_metric=getattr(cfg.loop, "diversity_metric", "tanimoto"),
+        generator_refresh=dict(getattr(cfg.loop, "generator_refresh", {})),
+        property_aliases=dict(getattr(cfg.loop, "property_aliases", {})),
     )
 
     labelled = pd.read_csv(cfg.data.labelled)
@@ -186,10 +192,62 @@ def run_active_loop(args: argparse.Namespace) -> None:
             generator = _load_jtvae_from_ckpt(Path(args.generator_ckpt), len(fragment_vocab), cond_dim=len(loop_cfg.target_columns))
 
     dft = None
+    qc_store = None
+    qc_manager = None
     if args.use_pseudo_dft:
         from src.data.dft_int import DFTInterface  # lazy import
 
         dft = DFTInterface()
+    else:
+        qc_cfg = getattr(cfg, "qc", None)
+        if qc_cfg:
+            from src.data.dft_int import DFTInterface  # lazy import
+            from src.qc.config import GeometryConfig, QuantumTaskConfig, PipelineConfig
+            from src.qc.pipeline import QCPipeline, AsyncQCManager
+            from src.qc.storage import QCResultStore
+
+            pipeline_data = {}
+            pipeline_config_path = getattr(qc_cfg, "pipeline_config", None)
+            if pipeline_config_path:
+                pipeline_path = Path(pipeline_config_path)
+                if not pipeline_path.exists():
+                    raise FileNotFoundError(f"QC pipeline config not found: {pipeline_path}")
+                with pipeline_path.open("r", encoding="utf-8") as fh:
+                    pipeline_data = yaml.safe_load(fh) or {}
+            defaults = PipelineConfig()
+            geometry_cfg = GeometryConfig(**pipeline_data.get("geometry", {}))
+            quantum_cfg = QuantumTaskConfig(**pipeline_data.get("quantum", {}))
+            pipeline_kwargs = {
+                "geometry": geometry_cfg,
+                "quantum": quantum_cfg,
+                "work_dir": Path(pipeline_data.get("work_dir", defaults.work_dir)),
+                "max_workers": pipeline_data.get("max_workers", defaults.max_workers),
+                "poll_interval": pipeline_data.get("poll_interval", defaults.poll_interval),
+                "cleanup_workdir": pipeline_data.get("cleanup_workdir", defaults.cleanup_workdir),
+                "store_metadata": pipeline_data.get("store_metadata", defaults.store_metadata),
+                "tracked_properties": tuple(pipeline_data.get("tracked_properties", defaults.tracked_properties)),
+            }
+            pipeline_config = PipelineConfig(**pipeline_kwargs)
+            if hasattr(qc_cfg, "engine"):
+                pipeline_config.quantum.engine = qc_cfg.engine
+            if hasattr(qc_cfg, "method"):
+                pipeline_config.quantum.method = qc_cfg.method
+            if hasattr(qc_cfg, "basis"):
+                pipeline_config.quantum.basis = qc_cfg.basis
+            if hasattr(qc_cfg, "properties"):
+                pipeline_config.quantum.properties = tuple(qc_cfg.properties)
+            if isinstance(pipeline_config.work_dir, str):
+                pipeline_config.work_dir = Path(pipeline_config.work_dir)
+            if isinstance(pipeline_config.quantum.scratch_dir, str):
+                pipeline_config.quantum.scratch_dir = Path(pipeline_config.quantum.scratch_dir)
+            pipeline_config.quantum.properties = tuple(pipeline_config.quantum.properties)
+            pipeline_config.tracked_properties = tuple(pipeline_config.tracked_properties)
+            store_path = getattr(qc_cfg, "result_store", None)
+            if store_path:
+                qc_store = QCResultStore(Path(store_path))
+            pipeline = QCPipeline(pipeline_config, result_store=qc_store)
+            qc_manager = AsyncQCManager(pipeline, max_workers=pipeline_config.max_workers)
+            dft = DFTInterface(executor=qc_manager)
 
     loop = ActiveLearningLoop(
         surrogate=surrogate,
@@ -202,6 +260,8 @@ def run_active_loop(args: argparse.Namespace) -> None:
     )
     loop.run(args.iterations)
     loop.save_history()
+    if qc_manager is not None:
+        qc_manager.shutdown()
     print("Active learning completed.")
 
 

@@ -1,10 +1,16 @@
 loop:
   batch_size: 8
-  target_columns: [HOMO, LUMO]
-  maximise: [false, true]
+  target_columns: [HOMO_eV, LUMO_eV, gap_eV, IE_eV, EA_eV]
+  maximise: [false, true, false, false, true]
   generator_samples: 32
   results_dir: experiments/active_runs
   diversity_threshold: 0.85
+  property_aliases:
+    HOMO: HOMO_eV
+    LUMO: LUMO_eV
+    gap: gap_eV
+    IE: IE_eV
+    EA: EA_eV
   generator_refresh:
     epochs: 1
     batch_size: 16
@@ -20,12 +26,15 @@ assemble:
 acquisition:
   kind: pareto_ucb
   beta: 1.5
-  maximise: [true, true]
+  maximise: [false, true, false, false, true]
 scheduler:
   max_iterations: 20
   surrogate_retrain_every: 1
   generator_refresh_every: 5
 data:
-  labelled: data/labelled_seed.csv
-  pool: data/pool_candidates.csv
+  labelled: data/processed/surrogate_labelled.csv
+  pool: data/processed/jtvae_pool.csv
   fragment_vocab: data/fragment_vocab.json
+qc:
+  pipeline_config: configs/qc_pipeline.yaml
+  result_store: data/processed/qc_results.csv

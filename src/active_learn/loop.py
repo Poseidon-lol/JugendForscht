@@ -20,6 +20,7 @@ else:
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
+import json
 
 import numpy as np
 import pandas as pd
@@ -27,7 +28,7 @@ import pandas as pd
 from src.active_learn.acq import AcquisitionConfig, acquisition_score
 from src.active_learn.sched import ActiveLearningScheduler, SchedulerConfig
 from src.data.dataset import split_dataframe
-from src.data.dft_int import DFTInterface, DFTJobSpec
+from src.data.dft_int import DFTInterface, DFTJobSpec, DFTResult
 from src.data.featurization import mol_to_graph
 from src.models.ensemble import SurrogateEnsemble
 from src.models.jtvae_extended import JTVAE, sample_conditional
@@ -41,6 +42,15 @@ except Exception:  # pragma: no cover - optional dependency
     RDKit_AVAILABLE = False
 
 logger = get_logger(__name__)
+
+PROPERTY_DEFAULT_ALIASES = {
+    "HOMO": "HOMO_eV",
+    "LUMO": "LUMO_eV",
+    "gap": "gap_eV",
+    "IE": "IE_eV",
+    "EA": "EA_eV",
+}
+
 
 
 @dataclass
@@ -56,6 +66,7 @@ class LoopConfig:
     diversity_threshold: float = 0.85
     diversity_metric: str = "tanimoto"
     generator_refresh: Dict[str, object] = field(default_factory=dict)
+    property_aliases: Dict[str, str] = field(default_factory=dict)
 
 
 class ActiveLearningLoop:
@@ -85,6 +96,8 @@ class ActiveLearningLoop:
         self.diversity_threshold = float(getattr(config, "diversity_threshold", 0.0))
         self.diversity_metric = getattr(config, "diversity_metric", "tanimoto").lower()
         self.generator_refresh_kwargs = dict(getattr(config, "generator_refresh", {}))
+        self.property_aliases = dict(PROPERTY_DEFAULT_ALIASES)
+        self.property_aliases.update(getattr(config, "property_aliases", {}))
         self._fingerprint_cache: Dict[str, Optional[object]] = {}
         self._fingerprints: List[object] = []
         if RDKit_AVAILABLE and self.diversity_threshold > 0:
@@ -324,8 +337,14 @@ class ActiveLearningLoop:
     def _label_with_dft(self, selected: pd.DataFrame) -> pd.DataFrame:
         if self.dft is None:
             return selected
+        inverse_alias = {v: k for k, v in self.property_aliases.items()}
+        requested_props_unique: List[str] = []
+        for column in self.config.target_columns:
+            base = inverse_alias.get(column, column)
+            if base not in requested_props_unique:
+                requested_props_unique.append(base)
         jobs = [
-            DFTJobSpec(smiles=row["smiles"], properties=list(self.config.target_columns))
+            DFTJobSpec(smiles=row["smiles"], properties=requested_props_unique)
             for _, row in selected.iterrows()
         ]
         ids = self.dft.submit_batch(jobs)
@@ -334,9 +353,24 @@ class ActiveLearningLoop:
             res = self.dft.fetch(job_id, block=True, poll_interval=1.0)
             results.append(res)
         for df_row, res in zip(selected.itertuples(index=True), results):
-            for prop, value in res.properties.items():
-                selected.at[df_row.Index, prop] = value
+            if res is None:
+                continue
+            if res.status != "success":
+                logger.warning("QC job %s returned status %s", res.job.job_id, res.status)
+            self._apply_result(df_row.Index, selected, res)
+            selected.at[df_row.Index, "qc_status"] = res.status
+            selected.at[df_row.Index, "qc_wall_time"] = res.wall_time
+            if res.metadata:
+                selected.at[df_row.Index, "qc_metadata"] = json.dumps(res.metadata, ensure_ascii=False)
         return selected
+
+    def _apply_result(self, row_index: int, frame: pd.DataFrame, result: DFTResult) -> Dict[str, float]:
+        mapped = {}
+        for prop, value in result.properties.items():
+            column = self.property_aliases.get(prop, prop)
+            frame.at[row_index, column] = value
+            mapped[column] = value
+        return mapped
 
     def _retrain_surrogate(self) -> None:
         if len(self.labelled) < len(self.config.target_columns) + 5:
