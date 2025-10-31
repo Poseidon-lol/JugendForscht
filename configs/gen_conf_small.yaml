@@ -1,0 +1,17 @@
+dataset:
+  path: data/processed/jtvae_pool_sub.csv
+  target_columns: [HOMO_eV, LUMO_eV, IE_eV, EA_eV]
+  max_fragments: 12
+  fragment_min_count: 2
+model:
+  z_dim: 64
+  hidden_dim: 256
+  cond_dim: 4
+training:
+  epochs: 5
+  batch_size: 1
+  lr: 0.001
+  kl_weight: 0.5
+  property_loss_weight: 0.1
+  adjacency_loss_weight: 1.0
+save_dir: models/generator_test

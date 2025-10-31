@@ -40,6 +40,7 @@ Usage:
 import os
 import json
 import argparse
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -81,24 +82,47 @@ except Exception:
 # Fragment utilities
 # -------------------------
 
+
+def _load_mol_no_kekulize(smiles: str):
+    mol = Chem.MolFromSmiles(smiles, sanitize=False)
+    if mol is None:
+        return None
+    sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_KEKULIZE
+    try:
+        Chem.SanitizeMol(mol, sanitizeOps=sanitize_ops)
+    except Exception as exc:  # pragma: no cover - RDKit warnings only
+        logging.getLogger(__name__).debug("SanitizeMol skipped kekulize for %s: %s", smiles, exc)
+    return mol
+
+
 def extract_fragments(smiles: str):
-    mol = Chem.MolFromSmiles(smiles)
+    mol = _load_mol_no_kekulize(smiles)
     if mol is None:
         return []
     frags = set()
-    ri = mol.GetRingInfo()
-    for ring in ri.AtomRings():
-        atom_idxs = list(ring)
-        sub = Chem.PathToSubmol(mol, atom_idxs)
-        s = Chem.MolToSmiles(sub)
-        frags.add(s)
+    try:
+        ri = mol.GetRingInfo()
+        for ring in ri.AtomRings():
+            try:
+                s = Chem.MolFragmentToSmiles(
+                    mol,
+                    atomsToUse=list(ring),
+                    canonical=True,
+                    sanitize=False,
+                    kekuleSmiles=False,
+                )
+            except Exception:
+                s = None
+            if s:
+                frags.add(s)
+    except Exception:
+        logging.getLogger(__name__).debug("Ring extraction failed for %s", smiles)
     try:
         ms = rdMolDescriptors.CalcMurckoScaffoldSmiles(mol)
         if ms and ms.strip():
             frags.add(ms)
     except Exception:
-        pass
-    # fallback: whole molecule
+        logging.getLogger(__name__).debug("Murcko scaffold failed for %s", smiles)
     if len(frags) == 0:
         frags.add(smiles)
     return list(frags)
@@ -337,7 +361,16 @@ def prepare_jtvae_examples(
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df)
 
-    cond_matrix = df[cond_cols].to_numpy(dtype=float)
+    numeric = df[cond_cols].apply(pd.to_numeric, errors="coerce")
+    valid_mask = numeric.notna().all(axis=1)
+    if not valid_mask.all():
+        dropped = int((~valid_mask).sum())
+        logging.getLogger(__name__).warning(
+            "prepare_jtvae_examples: dropping %d rows with missing conditioning values.", dropped
+        )
+        df = df.loc[valid_mask].reset_index(drop=True)
+        numeric = numeric.loc[valid_mask].reset_index(drop=True)
+    cond_matrix = numeric.to_numpy(dtype=float)
     cond_mean = cond_matrix.mean(axis=0)
     cond_std = cond_matrix.std(axis=0)
     cond_std = np.where(cond_std < 1e-8, 1.0, cond_std)

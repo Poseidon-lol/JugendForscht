@@ -83,6 +83,18 @@ from src.utils.device import ensure_state_dict_on_cpu, get_device, move_to_devic
 # Fragmentation utilities (very simplified)
 # -------------------------
 
+def _load_mol_no_kekulize(smiles: str):
+    mol = Chem.MolFromSmiles(smiles, sanitize=False)
+    if mol is None:
+        return None
+    sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_KEKULIZE
+    try:
+        Chem.SanitizeMol(mol, sanitizeOps=sanitize_ops)
+    except Exception as exc:  # pragma: no cover - RDKit warnings only
+        logging.getLogger(__name__).debug("SanitizeMol skipped kekulize for %s: %s", smiles, exc)
+    return mol
+
+
 def extract_fragments(smiles: str) -> List[str]:
     """Extract ring fragments / Murcko scaffolds as candidate-junction-nodes.
 
@@ -91,23 +103,32 @@ def extract_fragments(smiles: str) -> List[str]:
     """
     if not RDKit_AVAILABLE:
         raise RuntimeError("RDKit required for fragmentation")
-    mol = Chem.MolFromSmiles(smiles)
+    mol = _load_mol_no_kekulize(smiles)
     if mol is None:
         return []
     frags = set()
-    # use ring info
-    ri = mol.GetRingInfo()
-    for ring in ri.AtomRings():
-        atom_idxs = list(ring)
-        sub = Chem.PathToSubmol(mol, atom_idxs)
-        s = Chem.MolToSmiles(sub)
-        frags.add(s)
+    try:
+        ri = mol.GetRingInfo()
+        for ring in ri.AtomRings():
+            atom_idxs = list(ring)
+            try:
+                sub = Chem.PathToSubmol(mol, atom_idxs)
+                if sub is None:
+                    continue
+                s = Chem.MolToSmiles(sub, canonical=True, kekuleSmiles=False)
+                if s:
+                    frags.add(s)
+            except Exception:
+                continue
+    except Exception:
+        logging.getLogger(__name__).debug("Ring extraction failed for %s", smiles)
     # add Murcko scaffold
     try:
         ms = rdMolDescriptors.CalcMurckoScaffoldSmiles(mol)
-        frags.add(ms)
+        if ms:
+            frags.add(ms)
     except Exception:
-        pass
+        logging.getLogger(__name__).debug("Murcko scaffold failed for %s", smiles)
     return [f for f in frags if len(f) > 0]
 
 # -------------------------
@@ -144,8 +165,10 @@ class SimpleGNNEncoder(nn.Module):
         if batch is None:
             # assume single graph -> global mean pool
             return h.mean(dim=0, keepdim=True)
-        else:
-            return global_mean_pool(h, batch)
+        if isinstance(batch, torch.Tensor) and (batch.device.type == "privateuseone" or h.device.type == "privateuseone"):
+            pooled = global_mean_pool(h.to("cpu"), batch.to("cpu"))
+            return pooled.to(h.device)
+        return global_mean_pool(h, batch)
 
 # -------------------------
 # JT-VAE core classes (simplified)
@@ -153,12 +176,12 @@ class SimpleGNNEncoder(nn.Module):
 class JTEncoder(nn.Module):
     """Encodes both junction tree (fragment-level) and molecular graph into latents."""
 
-    def __init__(self, node_feat_dim, hidden_dim=128, z_dim=56, cond_dim=0):
+    def __init__(self, tree_feat_dim, graph_feat_dim, hidden_dim=128, z_dim=56, cond_dim=0):
         super().__init__()
         # tree-level encoder (fragments as nodes)
-        self.tree_encoder = SimpleGNNEncoder(node_feat_dim, hidden_dim)
+        self.tree_encoder = SimpleGNNEncoder(tree_feat_dim, hidden_dim)
         # graph-level encoder (full molecule)
-        self.graph_encoder = SimpleGNNEncoder(node_feat_dim, hidden_dim)
+        self.graph_encoder = SimpleGNNEncoder(graph_feat_dim, hidden_dim)
         # combine
         self.fc_mu = nn.Linear(2 * hidden_dim + cond_dim, z_dim)
         self.fc_logvar = nn.Linear(2 * hidden_dim + cond_dim, z_dim)
@@ -420,7 +443,8 @@ def beam_search_fragments(
 class JTVAE(nn.Module):
     def __init__(
         self,
-        node_feat_dim,
+        tree_feat_dim,
+        graph_feat_dim,
         fragment_vocab_size,
         z_dim=56,
         hidden_dim=128,
@@ -430,7 +454,8 @@ class JTVAE(nn.Module):
         super().__init__()
         self.max_tree_nodes = max_tree_nodes
         self.encoder = JTEncoder(
-            node_feat_dim=node_feat_dim,
+            tree_feat_dim=tree_feat_dim,
+            graph_feat_dim=graph_feat_dim,
             hidden_dim=hidden_dim,
             z_dim=z_dim,
             cond_dim=cond_dim,
@@ -655,6 +680,11 @@ def train_jtvae(
 ):
     os.makedirs(save_dir, exist_ok=True)
     device_spec = get_device(device)
+    if device_spec.type == "directml":
+        logging.getLogger(__name__).warning(
+            "DirectML backend lacks required scatter kernels for PyG; falling back to CPU for JT-VAE training."
+        )
+        device_spec = get_device("cpu")
     model.to(device_spec.target)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -780,6 +810,34 @@ def sample_conditional(
 # -------------------------
 # Dataset adapter for JT-VAE
 # -------------------------
+class JTData(Data):
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == "tree_edge_index":
+            return self.tree_x.size(0)
+        if key == "graph_edge_index":
+            return self.graph_x.size(0)
+        if key == "tree_batch":
+            # increment fragment batch indices by one per example
+            return value.new_full((1,), 1, dtype=value.dtype, device=value.device)
+        if key == "batch":
+            return value.new_full((1,), 1, dtype=value.dtype, device=value.device)
+        if key in {"target_frag_idxs", "tree_adj"}:
+            return 0
+        return super().__inc__(key, value, *args, **kwargs)
+
+    def __cat_dim__(self, key, value, *args, **kwargs):
+        if key in {"tree_edge_index", "graph_edge_index"}:
+            return 1
+        if key in {"tree_batch", "batch"}:
+            return 0
+        if key in {"target_frag_idxs", "tree_adj"}:
+            # keep per-graph tensors in separate batch dimension
+            return None
+        if key == "cond":
+            return 0
+        return super().__cat_dim__(key, value, *args, **kwargs)
+
+
 class JTVDataset(torch.utils.data.Dataset):
     """Dataset should provide per-example:
     - tree_x, tree_edge_index, tree_batch (fragment-level graphs)
@@ -799,19 +857,23 @@ class JTVDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         ex = self.examples[idx]
-        # return a simple dict-like object; the training loop expects attributes
-        class B:
-            pass
-        b = B()
-        b.tree_x = ex['tree_x']
-        b.tree_edge_index = ex['tree_edge_index']
-        b.graph_x = ex['graph_x']
-        b.graph_edge_index = ex['graph_edge_index']
-        b.target_frag_idxs = ex.get('target_frag_idxs', None)
-        b.cond = ex.get('cond', None)
-        b.tree_adj = ex.get('tree_adj', None)
-        b.num_graphs = 1
-        return b
+        data = JTData()
+        data.tree_x = ex["tree_x"]
+        data.tree_edge_index = ex["tree_edge_index"]
+        data.graph_x = ex["graph_x"]
+        data.graph_edge_index = ex["graph_edge_index"]
+        data.target_frag_idxs = ex.get("target_frag_idxs", None)
+        cond = ex.get("cond", None)
+        if cond is not None:
+            data.cond = cond.unsqueeze(0) if cond.dim() == 1 else cond
+        data.tree_adj = ex.get("tree_adj", None)
+        data.num_graphs = 1
+        data.tree_num_nodes = data.tree_x.size(0)
+        data.graph_num_nodes = data.graph_x.size(0)
+        data.tree_batch = torch.zeros(data.tree_num_nodes, dtype=torch.long)
+        data.batch = torch.zeros(data.graph_num_nodes, dtype=torch.long)
+        data.num_nodes = data.graph_num_nodes
+        return data
 
 # -------------------------
 # Quick usage notes

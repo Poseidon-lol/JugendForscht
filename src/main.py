@@ -94,23 +94,34 @@ def train_generator(args: argparse.Namespace) -> None:
     from src.models.jtvae_extended import JTVAE, JTVDataset, train_jtvae
 
     cfg = load_config(args.config)
+    logger = logging.getLogger(__name__)
     data_cfg = cfg.dataset
+    logger.info("Loading JT-VAE dataset from %s", data_cfg.path)
     df = pd.read_csv(data_cfg.path)
-    frag2idx, idx2frag = build_fragment_vocab(df["smiles"], min_count=1)
+    logger.info("Loaded %d molecules for JT-VAE training.", len(df))
+    min_count = getattr(data_cfg, "fragment_min_count", 1)
+    frag2idx, idx2frag = build_fragment_vocab(df["smiles"], min_count=min_count)
+    logger.info("Fragment vocabulary size: %d (min_count=%s)", len(frag2idx), min_count)
     cond_cols = cfg.dataset.target_columns
     jt_config = JTPreprocessConfig(
         max_fragments=cfg.dataset.max_fragments,
         condition_columns=cond_cols,
+    )
+    logger.info(
+        "Preparing JT-VAE examples (max_fragments=%s, condition_columns=%s)...",
+        cfg.dataset.max_fragments,
+        cond_cols,
     )
     examples = prepare_jtvae_examples(
         df,
         frag2idx,
         config=jt_config,
     )
+    logger.info("Prepared %d JT-VAE examples.", len(examples))
     dataset = JTVDataset(examples)
+    logger.info("Constructed JTVDataset with %d entries.", len(dataset))
     cond_dim_value = len(cond_cols) if getattr(cfg.model, "cond_dim", None) is None else cfg.model.cond_dim
     if cond_dim_value != len(cond_cols):
-        logger = logging.getLogger(__name__)
         logger.warning(
             "Configured cond_dim (%s) differs from number of condition columns (%s). "
             "Using %s for property head.",
@@ -119,8 +130,12 @@ def train_generator(args: argparse.Namespace) -> None:
             len(cond_cols),
         )
         cond_dim_value = len(cond_cols)
+    tree_feat_dim = examples[0]["tree_x"].size(1)
+    graph_feat_dim = examples[0]["graph_x"].size(1)
+    logger.info("Tree feature dim: %s | Graph feature dim: %s", tree_feat_dim, graph_feat_dim)
     model = JTVAE(
-        node_feat_dim=examples[0]["graph_x"].size(1),
+        tree_feat_dim=tree_feat_dim,
+        graph_feat_dim=graph_feat_dim,
         fragment_vocab_size=len(frag2idx),
         z_dim=cfg.model.z_dim,
         hidden_dim=cfg.model.hidden_dim,
@@ -130,6 +145,15 @@ def train_generator(args: argparse.Namespace) -> None:
     kl_weight = getattr(cfg.training, "kl_weight", 0.5)
     property_weight = getattr(cfg.training, "property_loss_weight", 0.0)
     adjacency_weight = getattr(cfg.training, "adjacency_loss_weight", 1.0)
+    logger.info(
+        "Starting JT-VAE training: epochs=%s batch_size=%s lr=%s (kl=%s, prop=%s, adj=%s)",
+        cfg.training.epochs,
+        cfg.training.batch_size,
+        cfg.training.lr,
+        kl_weight,
+        property_weight,
+        adjacency_weight,
+    )
     train_jtvae(
         model,
         dataset,
