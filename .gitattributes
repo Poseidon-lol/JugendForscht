@@ -1,9 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
-<<<<<<< HEAD
-git lfs track "*.csv"
-=======
->>>>>>> 8b4a1bcda3aa30da87eb95b84ed0ca93b2823968
 *.csv filter=lfs diff=lfs merge=lfs -text
 m1507656/df_31k.json filter=lfs diff=lfs merge=lfs -text
 m1507656/df_5k.json filter=lfs diff=lfs merge=lfs -text
