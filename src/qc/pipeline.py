@@ -10,7 +10,7 @@ HARTREE_TO_EV = 27.211386245988
 
 from src.data.dft_int import DFTJobSpec
 
-from .config import PipelineConfig
+from .config import PipelineConfig, QuantumTaskConfig
 from .executors import (
     DEFAULT_EXECUTORS,
     ExecutionError,
