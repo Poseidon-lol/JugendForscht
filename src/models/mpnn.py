@@ -23,7 +23,8 @@ Notes:
 import os
 import math
 import random
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+import contextlib
 
 import numpy as np
 import pandas as pd
@@ -207,32 +208,48 @@ def train_one(
     *,
     loss_fn=None,
     grad_clip: float = 0.0,
+    use_amp: bool = False,
+    scaler: Optional["torch.cuda.amp.GradScaler"] = None,
 ):
     device_spec = get_device(device)
     target = device_spec.target
+    amp_enabled = bool(use_amp) and device_spec.supports_amp
+    scaler = scaler if amp_enabled else None
+    autocast_ctx = torch.cuda.amp.autocast if amp_enabled else contextlib.nullcontext
     model.train()
     total_loss = 0.0
     for batch in loader:
         batch = move_to_device(batch, device_spec)
-        optimizer.zero_grad()
-        pred = model(batch)
-        y = batch.y.view(pred.size(0), -1).to(target)
-        if loss_fn is None:
-            loss = F.l1_loss(pred, y)  # MAE
+        optimizer.zero_grad(set_to_none=True)
+        with autocast_ctx():
+            pred = model(batch)
+            y = batch.y.view(pred.size(0), -1).to(target)
+            if loss_fn is None:
+                loss = F.l1_loss(pred, y)  # MAE
+            else:
+                loss = loss_fn(pred, y)
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if grad_clip and grad_clip > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
         else:
-            loss = loss_fn(pred, y)
-        loss.backward()
-        if grad_clip and grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+            loss.backward()
+            if grad_clip and grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
         total_loss += loss.item() * pred.size(0)
     return total_loss / len(loader.dataset)
 
 
 def evaluate(model: nn.Module, loader: DataLoader, device: DeviceSpec | torch.device | str,
-             loss_fn=None) -> Tuple[float, np.ndarray, np.ndarray]:
+             loss_fn=None, use_amp: bool = False) -> Tuple[float, np.ndarray, np.ndarray]:
     device_spec = get_device(device)
     target = device_spec.target
+    amp_enabled = bool(use_amp) and device_spec.supports_amp
+    autocast_ctx = torch.cuda.amp.autocast if amp_enabled else contextlib.nullcontext
     model.eval()
     preds = []
     trues = []
@@ -241,7 +258,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: DeviceSpec | torch.de
     with torch.no_grad():
         for batch in loader:
             batch = move_to_device(batch, device_spec)
-            out = model(batch)
+            with autocast_ctx():
+                out = model(batch)
             preds.append(out.cpu().numpy())
             trues.append(batch.y.view(out.size(0), -1).cpu().numpy())
             if loss_fn is not None:

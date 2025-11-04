@@ -41,7 +41,8 @@ import os
 import math
 import random
 import logging
-from typing import Dict, List, Optional, Tuple
+import contextlib
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -677,6 +678,10 @@ def train_jtvae(
     kl_weight: float = 0.5,
     property_weight: float = 0.0,
     adj_weight: float = 1.0,
+    use_amp: bool = False,
+    compile: bool = False,
+    compile_mode: str = "default",
+    compile_fullgraph: bool = False,
 ):
     os.makedirs(save_dir, exist_ok=True)
     device_spec = get_device(device)
@@ -685,11 +690,50 @@ def train_jtvae(
             "DirectML backend lacks required scatter kernels for PyG; falling back to CPU for JT-VAE training."
         )
         device_spec = get_device("cpu")
+    amp_requested = bool(use_amp)
+    amp_enabled = amp_requested and device_spec.supports_amp
+    if amp_requested and not amp_enabled:
+        logging.getLogger(__name__).warning(
+            "AMP requested for JT-VAE training but CUDA is unavailable; continuing with full precision."
+        )
     model.to(device_spec.target)
+    compile_requested = bool(compile)
+    if compile_requested:
+        compile_fn = getattr(torch, "compile", None)
+        if compile_fn is None:
+            logging.getLogger(__name__).warning(
+                "torch.compile requested for JT-VAE but not available in this PyTorch build; using eager execution."
+            )
+            compile_requested = False
+        else:
+            try:
+                model = compile_fn(model, mode=compile_mode, fullgraph=compile_fullgraph)
+                logging.getLogger(__name__).info(
+                    "Enabled torch.compile for JT-VAE (mode=%s, fullgraph=%s).", compile_mode, compile_fullgraph
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "torch.compile failed for JT-VAE; reverting to eager execution."
+                )
+                compile_requested = False
+    resolved_device = (
+        f"{device_spec.type}:{device_spec.index}" if device_spec.index is not None else device_spec.type
+    )
+    logging.getLogger(__name__).info(
+        "JT-VAE training on %s (AMP=%s, compile=%s).",
+        resolved_device,
+        "enabled" if amp_enabled else "disabled",
+        "enabled" if compile_requested else "disabled",
+    )
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     # dataset should provide precomputed: tree_x, tree_edge_index, graph_x, graph_edge_index, target_frag_idxs, cond
-    loader = PyGDataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader_kwargs = {"batch_size": batch_size, "shuffle": True}
+    if device_spec.is_cuda:
+        loader_kwargs["pin_memory"] = True
+    loader = PyGDataLoader(dataset, **loader_kwargs)
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled) if amp_enabled else None
+    autocast_ctx = torch.cuda.amp.autocast if amp_enabled else contextlib.nullcontext
     for epoch in range(1, epochs+1):
         model.train()
         epoch_loss = 0.0
@@ -709,32 +753,38 @@ def train_jtvae(
                 target_frag_idxs = target_frag_idxs.to(device_spec.target).long()
             if target_adj is not None:
                 target_adj = target_adj.to(device_spec.target).float()
-            frags_logits, node_feats, adj_logits, mu, logvar, prop_pred = model(
-                batch.tree_x,
-                batch.tree_edge_index,
-                batch.graph_x,
-                batch.graph_edge_index,
-                batch_tree=batch.tree_batch if hasattr(batch, 'tree_batch') else None,
-                batch_graph=batch.batch if hasattr(batch, 'batch') else None,
-                cond=cond,
-            )
-            loss, recon, kl, prop_loss, adj_loss = jtvae_loss(
-                frags_logits,
-                node_feats,
-                mu,
-                logvar,
-                target_frag_idxs=target_frag_idxs,
-                property_pred=prop_pred,
-                cond_target=cond,
-                adj_logits=adj_logits,
-                adj_target=target_adj,
-                beta=kl_weight,
-                aux_weight=property_weight,
-                adj_weight=adj_weight,
-            )
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
+            with autocast_ctx():
+                frags_logits, node_feats, adj_logits, mu, logvar, prop_pred = model(
+                    batch.tree_x,
+                    batch.tree_edge_index,
+                    batch.graph_x,
+                    batch.graph_edge_index,
+                    batch_tree=batch.tree_batch if hasattr(batch, 'tree_batch') else None,
+                    batch_graph=batch.batch if hasattr(batch, 'batch') else None,
+                    cond=cond,
+                )
+                loss, recon, kl, prop_loss, adj_loss = jtvae_loss(
+                    frags_logits,
+                    node_feats,
+                    mu,
+                    logvar,
+                    target_frag_idxs=target_frag_idxs,
+                    property_pred=prop_pred,
+                    cond_target=cond,
+                    adj_logits=adj_logits,
+                    adj_target=target_adj,
+                    beta=kl_weight,
+                    aux_weight=property_weight,
+                    adj_weight=adj_weight,
+                )
+            opt.zero_grad(set_to_none=True)
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                opt.step()
             epoch_loss += loss.item() * batch.num_graphs
             epoch_recon += recon.item() * batch.num_graphs
             epoch_kl += kl.item() * batch.num_graphs
@@ -758,6 +808,7 @@ def sample_conditional(
     n_samples: int = 32,
     assembler: str = "beam",
     assemble_kwargs: Optional[Dict] = None,
+    device: Optional[Union[str, torch.device]] = None,
 ) -> List[Dict[str, str]]:
     """Convenience wrapper that converts JT-VAE samples into dicts with SMILES strings.
 
@@ -775,6 +826,8 @@ def sample_conditional(
         Currently unused placeholder to keep API compatibility with future assemblers.
     assemble_kwargs:
         Optional overrides, e.g. ``{"max_tree_nodes": 16}``.
+    device:
+        Optional device specifier forwarded to ``JTVAE.sample`` (e.g. ``"cuda:0"``).
     """
 
     del assembler  # placeholder for compatibility
@@ -791,6 +844,7 @@ def sample_conditional(
         max_tree_nodes=max_tree_nodes,
         fragment_idx_to_smiles=idx_to_frag,
         assemble_kwargs=assemble_kwargs,
+        device=device,
     )
 
     formatted: List[Dict[str, str]] = []

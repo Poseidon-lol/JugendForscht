@@ -3,7 +3,11 @@ dataset:
   target_columns: [HOMO_eV, LUMO_eV, gap_eV, IE_eV, EA_eV]
   val_fraction: 0.1
 surrogate:
-  device: cpu
+  device: auto
+  use_amp: true
+  compile: true
+  compile_mode: default
+  compile_fullgraph: false
   n_models: 5
   epochs: 120
   batch_size: 64

@@ -12,4 +12,9 @@ training:
   lr: 0.001
   kl_weight: 0.5
   property_loss_weight: 0.1
+  device: auto
+  use_amp: true
+  compile: true
+  compile_mode: default
+  compile_fullgraph: false
 save_dir: models/generator

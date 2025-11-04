@@ -37,6 +37,14 @@ class DeviceSpec:
     def as_torch_device(self) -> Optional[torch.device]:
         return self.target if isinstance(self.target, torch.device) else None
 
+    @property
+    def is_cuda(self) -> bool:
+        return self.type == "cuda"
+
+    @property
+    def supports_amp(self) -> bool:
+        return self.type == "cuda"
+
 
 def _mps_available() -> bool:
     return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
@@ -50,6 +58,8 @@ def get_device(device: Optional[Union[str, torch.device, DeviceSpec]] = None) ->
         return DeviceSpec(target=device, type=device.type, index=device.index)
     if isinstance(device, str):
         lowered = device.strip().lower()
+        if lowered in {"auto", "best", "", "default"}:
+            return get_device(None)
         if lowered.startswith("cuda") or lowered.startswith("hip"):
             if not torch.cuda.is_available():
                 raise ValueError("CUDA/HIP requested but no compatible GPU is available.")

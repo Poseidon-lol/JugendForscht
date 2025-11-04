@@ -25,6 +25,7 @@ else:
 from src.data.dataset import load_dataframe, split_dataframe
 from src.models.ensemble import EnsembleConfig, SurrogateEnsemble
 from src.utils.config import load_config
+from src.utils.device import get_device
 from src.utils.log import setup_logging
 
 if TYPE_CHECKING:
@@ -33,6 +34,16 @@ if TYPE_CHECKING:
 
 def train_surrogate(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
+    if args.device:
+        cfg.surrogate.device = args.device
+    if args.amp is not None:
+        cfg.surrogate.use_amp = bool(args.amp)
+    if args.compile is not None:
+        cfg.surrogate.compile = bool(args.compile)
+    if args.compile_mode:
+        cfg.surrogate.compile_mode = args.compile_mode
+    if args.compile_fullgraph is not None:
+        cfg.surrogate.compile_fullgraph = bool(args.compile_fullgraph)
     data_cfg = cfg.dataset
     df = load_dataframe(data_cfg.path)
     target_columns = list(getattr(data_cfg, "target_columns", []))
@@ -72,6 +83,10 @@ def train_surrogate(args: argparse.Namespace) -> None:
         calibrate=getattr(cfg.surrogate, "calibrate", True),
         save_dir=Path(cfg.surrogate.save_dir),
         device=getattr(cfg.surrogate, "device", None),
+        use_amp=bool(getattr(cfg.surrogate, "use_amp", False)),
+        compile=bool(getattr(cfg.surrogate, "compile", False)),
+        compile_mode=getattr(cfg.surrogate, "compile_mode", "default"),
+        compile_fullgraph=bool(getattr(cfg.surrogate, "compile_fullgraph", False)),
     )
     surrogate = SurrogateEnsemble(ens_cfg)
     surrogate.fit(split.train, split.val)
@@ -109,6 +124,16 @@ def train_generator(args: argparse.Namespace) -> None:
     from src.models.jtvae_extended import JTVAE, JTVDataset, train_jtvae
 
     cfg = load_config(args.config)
+    if args.device:
+        cfg.training.device = args.device
+    if args.amp is not None:
+        cfg.training.use_amp = bool(args.amp)
+    if args.compile is not None:
+        cfg.training.compile = bool(args.compile)
+    if args.compile_mode:
+        cfg.training.compile_mode = args.compile_mode
+    if args.compile_fullgraph is not None:
+        cfg.training.compile_fullgraph = bool(args.compile_fullgraph)
     logger = logging.getLogger(__name__)
     data_cfg = cfg.dataset
     logger.info("Loading JT-VAE dataset from %s", data_cfg.path)
@@ -160,19 +185,28 @@ def train_generator(args: argparse.Namespace) -> None:
     kl_weight = getattr(cfg.training, "kl_weight", 0.5)
     property_weight = getattr(cfg.training, "property_loss_weight", 0.0)
     adjacency_weight = getattr(cfg.training, "adjacency_loss_weight", 1.0)
+    device_override = getattr(cfg.training, "device", None)
+    use_amp = bool(getattr(cfg.training, "use_amp", False))
+    compile_flag = bool(getattr(cfg.training, "compile", False))
+    compile_mode = getattr(cfg.training, "compile_mode", "default")
+    compile_fullgraph = bool(getattr(cfg.training, "compile_fullgraph", False))
     logger.info(
-        "Starting JT-VAE training: epochs=%s batch_size=%s lr=%s (kl=%s, prop=%s, adj=%s)",
+        "Starting JT-VAE training: epochs=%s batch_size=%s lr=%s (kl=%s, prop=%s, adj=%s) device=%s amp=%s compile=%s",
         cfg.training.epochs,
         cfg.training.batch_size,
         cfg.training.lr,
         kl_weight,
         property_weight,
         adjacency_weight,
+        device_override or "auto",
+        use_amp,
+        compile_flag,
     )
     train_jtvae(
         model,
         dataset,
         frag2idx,
+        device=device_override,
         epochs=cfg.training.epochs,
         batch_size=cfg.training.batch_size,
         lr=cfg.training.lr,
@@ -180,6 +214,10 @@ def train_generator(args: argparse.Namespace) -> None:
         kl_weight=kl_weight,
         property_weight=property_weight,
         adj_weight=adjacency_weight,
+        use_amp=use_amp,
+        compile=compile_flag,
+        compile_mode=compile_mode,
+        compile_fullgraph=compile_fullgraph,
     )
     vocab_path = Path(cfg.save_dir) / "fragment_vocab.json"
     vocab_path.parent.mkdir(parents=True, exist_ok=True)
@@ -201,6 +239,15 @@ def run_active_loop(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
     acq_cfg = AcquisitionConfig(**cfg.acquisition)
     sched_cfg = SchedulerConfig(**cfg.scheduler)
+    loop_device_cfg = getattr(cfg.loop, "device", None)
+    surrogate_device = getattr(cfg.loop, "surrogate_device", loop_device_cfg)
+    generator_device = getattr(cfg.loop, "generator_device", loop_device_cfg)
+    if getattr(args, "device", None):
+        surrogate_device = generator_device = args.device
+    if getattr(args, "surrogate_device", None):
+        surrogate_device = args.surrogate_device
+    if getattr(args, "generator_device", None):
+        generator_device = args.generator_device
     loop_cfg = LoopConfig(
         batch_size=cfg.loop.batch_size,
         acquisition=acq_cfg,
@@ -218,17 +265,30 @@ def run_active_loop(args: argparse.Namespace) -> None:
 
     labelled = pd.read_csv(cfg.data.labelled)
     pool = pd.read_csv(cfg.data.pool)
-    surrogate = SurrogateEnsemble.from_directory(Path(args.surrogate_dir))
+    surrogate = SurrogateEnsemble.from_directory(Path(args.surrogate_dir), device=surrogate_device)
 
     generator = None
     fragment_vocab: Optional[Dict[str, int]] = None
+    generator_device_runtime: Optional[str] = None
     if args.generator_ckpt and cfg.data.fragment_vocab:
         vocab_path = Path(cfg.data.fragment_vocab)
         if vocab_path.exists():
             with vocab_path.open("r", encoding="utf-8") as f:
                 fragment_vocab = {k: int(v) for k, v in json.load(f).items()}
         if fragment_vocab:
-            generator = _load_jtvae_from_ckpt(Path(args.generator_ckpt), len(fragment_vocab), cond_dim=len(loop_cfg.target_columns))
+            generator = _load_jtvae_from_ckpt(
+                Path(args.generator_ckpt),
+                len(fragment_vocab),
+                cond_dim=len(loop_cfg.target_columns),
+            )
+            if generator_device:
+                device_spec = get_device(generator_device)
+                generator = generator.to(device_spec.target)
+                generator_device_runtime = (
+                    f"{device_spec.type}:{device_spec.index}" if device_spec.index is not None else device_spec.type
+                )
+            else:
+                generator_device_runtime = None
 
     dft = None
     qc_store = None
@@ -296,6 +356,7 @@ def run_active_loop(args: argparse.Namespace) -> None:
         generator=generator,
         fragment_vocab=fragment_vocab,
         dft=dft,
+        generator_device=generator_device_runtime,
     )
     loop.run(args.iterations)
     loop.save_history()
@@ -312,9 +373,65 @@ def main() -> None:
     train_parser = subparsers.add_parser("train-surrogate")
     train_parser.add_argument("--config", default="configs/train_conf.yaml")
     train_parser.add_argument("--seed", type=int, default=42)
+    train_parser.add_argument(
+        "--device",
+        default=None,
+        help="Device for surrogate training (e.g. 'auto', 'cuda', 'cuda:0', 'cpu').",
+    )
+    train_parser.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable AMP mixed precision (default: taken from config).",
+    )
+    train_parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable torch.compile kernel fusion (default: from config).",
+    )
+    train_parser.add_argument(
+        "--compile-mode",
+        default=None,
+        help="torch.compile mode (default inherits from config).",
+    )
+    train_parser.add_argument(
+        "--compile-fullgraph",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Request fullgraph compilation when using torch.compile.",
+    )
 
     gen_parser = subparsers.add_parser("train-generator")
     gen_parser.add_argument("--config", default="configs/gen_conf.yaml")
+    gen_parser.add_argument(
+        "--device",
+        default=None,
+        help="Device for JT-VAE training (e.g. 'auto', 'cuda', 'cpu').",
+    )
+    gen_parser.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable AMP mixed precision for JT-VAE (default: config).",
+    )
+    gen_parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable torch.compile for JT-VAE (default: config).",
+    )
+    gen_parser.add_argument(
+        "--compile-mode",
+        default=None,
+        help="torch.compile mode for JT-VAE (default: config).",
+    )
+    gen_parser.add_argument(
+        "--compile-fullgraph",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Fullgraph toggle for torch.compile when training JT-VAE.",
+    )
 
     al_parser = subparsers.add_parser("active-loop")
     al_parser.add_argument("--config", default="configs/active_learn.yaml")
@@ -322,6 +439,21 @@ def main() -> None:
     al_parser.add_argument("--generator-ckpt", default=None)
     al_parser.add_argument("--iterations", type=int, default=5)
     al_parser.add_argument("--use-pseudo-dft", action="store_true")
+    al_parser.add_argument(
+        "--device",
+        default=None,
+        help="Device override for both surrogate and generator inference.",
+    )
+    al_parser.add_argument(
+        "--surrogate-device",
+        default=None,
+        help="Device override for surrogate inference (takes precedence over --device).",
+    )
+    al_parser.add_argument(
+        "--generator-device",
+        default=None,
+        help="Device override for generator sampling (takes precedence over --device).",
+    )
 
     args = parser.parse_args()
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)

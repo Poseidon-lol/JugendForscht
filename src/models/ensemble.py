@@ -60,6 +60,10 @@ class EnsembleConfig:
     save_dir: Path = Path("models/surrogate")
     device: Optional[str] = "cpu"
     seed: int = 1337
+    use_amp: bool = False
+    compile: bool = False
+    compile_mode: str = "default"
+    compile_fullgraph: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         data = asdict(self)
@@ -91,6 +95,8 @@ class SurrogateEnsemble:
         self._member_scores: List[float] = []
         self.temperature_: float = 1.0
         self._metrics: Dict[str, float] = {}
+        self._compile_warning_emitted: bool = False
+        self._compile_success_logged: bool = False
 
     # ------------------------------------------------------------------
     # Training
@@ -117,12 +123,14 @@ class SurrogateEnsemble:
         train_dataset = MoleculeDataset(train_df)
         val_dataset = MoleculeDataset(val_df) if val_df is not None and not val_df.empty else None
 
-        train_loader = PyGDataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
-        val_loader = (
-            PyGDataLoader(val_dataset, batch_size=self.config.batch_size, shuffle=False)
-            if val_dataset is not None
-            else None
-        )
+        loader_kwargs = {"batch_size": self.config.batch_size, "shuffle": True}
+        val_loader_kwargs = {"batch_size": self.config.batch_size, "shuffle": False}
+        if getattr(self.device, "is_cuda", False):
+            loader_kwargs["pin_memory"] = True
+            val_loader_kwargs["pin_memory"] = True
+
+        train_loader = PyGDataLoader(train_dataset, **loader_kwargs)
+        val_loader = PyGDataLoader(val_dataset, **val_loader_kwargs) if val_dataset is not None else None
 
         sample = train_dataset[0]
         self.node_dim = sample.x.size(1)
@@ -134,12 +142,33 @@ class SurrogateEnsemble:
         self._member_scores.clear()
 
         base_seed = self.config.seed
+        amp_requested = bool(getattr(self.config, "use_amp", False))
+        amp_enabled = amp_requested and self.device.supports_amp
+        if amp_requested and not amp_enabled:
+            logger.warning(
+                "AMP requested for surrogate training but device '%s' lacks CUDA support; falling back to FP32.",
+                self.device.type,
+            )
+        compile_requested = bool(getattr(self.config, "compile", False))
+        compile_mode = getattr(self.config, "compile_mode", "default")
+        compile_fullgraph = bool(getattr(self.config, "compile_fullgraph", False))
+        device_repr = (
+            f"{self.device.type}:{self.device.index}" if self.device.index is not None else self.device.type
+        )
+        logger.info(
+            "Surrogate ensemble training on %s (AMP=%s, compile=%s).",
+            device_repr,
+            "enabled" if amp_enabled else "disabled",
+            "enabled" if compile_requested else "disabled",
+        )
 
         for idx in range(self.config.n_models):
             logger.info("Training ensemble member %d/%d", idx + 1, self.config.n_models)
             self._set_all_seeds(base_seed + idx)
 
             model = self._build_model().to(self.device.target)
+            if compile_requested:
+                model = self._maybe_compile_model(model, mode=compile_mode, fullgraph=compile_fullgraph)
 
             optimizer = torch.optim.Adam(model.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
             loss_fn = self._resolve_loss()
@@ -158,6 +187,8 @@ class SurrogateEnsemble:
             best_val = float("inf")
             epochs_without_improve = 0
 
+            scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled) if amp_enabled else None
+
             for epoch in range(1, self.config.epochs + 1):
                 train_loss = train_one(
                     model,
@@ -166,10 +197,18 @@ class SurrogateEnsemble:
                     self.device,
                     loss_fn=loss_fn,
                     grad_clip=self.config.grad_clip,
+                    use_amp=amp_enabled,
+                    scaler=scaler,
                 )
                 val_metric = train_loss
                 if val_loader is not None:
-                    val_metric, _, _ = evaluate(model, val_loader, self.device, loss_fn=loss_fn)
+                    val_metric, _, _ = evaluate(
+                        model,
+                        val_loader,
+                        self.device,
+                        loss_fn=loss_fn,
+                        use_amp=amp_enabled,
+                    )
                     if scheduler is not None:
                         scheduler.step(val_metric)
 
@@ -332,7 +371,12 @@ class SurrogateEnsemble:
                     member.train()
                 else:
                     member.eval()
-                loader = PyGDataLoader(graphs, batch_size=effective_batch, shuffle=False)
+                loader = PyGDataLoader(
+                    graphs,
+                    batch_size=effective_batch,
+                    shuffle=False,
+                    pin_memory=self.device.is_cuda,
+                )
                 preds_batches: List[np.ndarray] = []
                 with torch.no_grad():
                     for batch in loader:
@@ -373,6 +417,27 @@ class SurrogateEnsemble:
             readout_type=self.config.readout,
             pooling=self.config.pooling,
         )
+
+    def _maybe_compile_model(self, model: torch.nn.Module, *, mode: str = "default", fullgraph: bool = False) -> torch.nn.Module:
+        compile_fn = getattr(torch, "compile", None)
+        if compile_fn is None:
+            if not self._compile_warning_emitted:
+                logger.warning(
+                    "torch.compile requested but not available in this PyTorch build; continuing with eager execution."
+                )
+                self._compile_warning_emitted = True
+            return model
+        try:
+            compiled = compile_fn(model, mode=mode, fullgraph=fullgraph)
+            if not self._compile_success_logged:
+                logger.info("Enabled torch.compile for surrogate training (mode=%s, fullgraph=%s).", mode, fullgraph)
+                self._compile_success_logged = True
+            return compiled
+        except Exception:
+            if not self._compile_warning_emitted:
+                logger.exception("torch.compile failed; falling back to eager execution.")
+                self._compile_warning_emitted = True
+            return model
 
     def _resolve_loss(self):
         if self.config.loss.lower() == "mae":

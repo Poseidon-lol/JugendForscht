@@ -60,8 +60,9 @@ The same parameter is available for:
 - PyTorch Geometric wheels currently target CUDA.  For DirectML you may need to
   build PyG from source or rely on CPU fallback operators if a kernel is
   missing.
-- Mixed precision (`torch.cuda.amp`) is not yet wired up for DirectML/ROCm.
-  Training runs in full precision by default.
+- Mixed precision (`torch.cuda.amp`) now kicks in automatically on CUDA builds
+  (configurable via `use_amp` / `--amp`).  DirectML/ROCm still run in FP32
+  because AMP kernels are not available there yet.
 - Loading checkpoints is always mapped through CPU for DirectML to ensure the
   runtime stays stable; this has a small overhead compared to CUDA.
 

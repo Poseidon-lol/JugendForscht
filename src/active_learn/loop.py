@@ -80,12 +80,14 @@ class ActiveLearningLoop:
         generator: Optional[JTVAE] = None,
         fragment_vocab: Optional[Dict[str, int]] = None,
         dft: Optional[DFTInterface] = None,
+        generator_device: Optional[str] = None,
     ) -> None:
         self.surrogate = surrogate
         self.config = config
         self.labelled = labelled.reset_index(drop=True)
         self.pool = pool.reset_index(drop=True)
         self.generator = generator
+        self.generator_device = generator_device
         self.fragment_vocab = fragment_vocab or {}
         self.dft = dft
         self.scheduler = ActiveLearningScheduler(config.scheduler)
@@ -100,6 +102,13 @@ class ActiveLearningLoop:
         self.property_aliases.update(getattr(config, "property_aliases", {}))
         self._fingerprint_cache: Dict[str, Optional[object]] = {}
         self._fingerprints: List[object] = []
+        if self.generator is not None:
+            self.generator.eval()
+            if self.generator_device is None:
+                try:
+                    self.generator_device = str(next(self.generator.parameters()).device)
+                except StopIteration:
+                    self.generator_device = None
         if RDKit_AVAILABLE and self.diversity_threshold > 0:
             initial_smiles = pd.concat(
                 [self.labelled.get("smiles", pd.Series(dtype=str)), self.pool.get("smiles", pd.Series(dtype=str))],
@@ -280,6 +289,7 @@ class ActiveLearningLoop:
                 n_samples=self.config.generator_samples,
                 assembler="beam",
                 assemble_kwargs=assemble_kwargs or self.assemble_kwargs,
+                device=self.generator_device,
             )
             new_rows = []
             for sample in samples:
