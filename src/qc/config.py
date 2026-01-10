@@ -48,6 +48,7 @@ class PipelineConfig:
     poll_interval: float = 10.0
     cleanup_workdir: bool = False
     store_metadata: bool = True
+    allow_fallback: bool = True
     tracked_properties: Sequence[str] = (
         "HOMO",
         "LUMO",

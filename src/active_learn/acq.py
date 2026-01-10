@@ -45,6 +45,8 @@ class AcquisitionConfig:
     xi: float = 0.01
     maximise: Optional[Sequence[bool]] = None
     weights: Optional[Sequence[float]] = None
+    targets: Optional[Sequence[float]] = None
+    tolerances: Optional[Sequence[float]] = None
 
 
 def upper_confidence_bound(mean: np.ndarray, std: np.ndarray, beta: float = 1.0) -> np.ndarray:
@@ -116,6 +118,29 @@ def acquisition_score(
         if config.maximise is None:
             raise ValueError("maximise required for pareto acquisition.")
         return pareto_rank(mean, config.maximise)
+
+    if config.kind == "target":
+        if config.targets is None:
+            raise ValueError("targets required for target acquisition.")
+        targets = np.asarray(config.targets, dtype=float)
+        if targets.shape[0] != mean.shape[1]:
+            raise ValueError("targets length mismatch with mean dimension.")
+        diff = np.abs(mean - targets)
+        if config.tolerances is not None:
+            tol = np.asarray(config.tolerances, dtype=float)
+            if tol.shape[0] != mean.shape[1]:
+                raise ValueError("tolerances length mismatch with mean dimension.")
+            tol = np.where(tol <= 0, 1.0, tol)
+            diff = diff / tol
+        if config.weights is not None:
+            weights = np.asarray(config.weights, dtype=float)
+            if weights.shape[0] != mean.shape[1]:
+                raise ValueError("weights length mismatch with mean dimension.")
+            diff = diff * weights
+        score = -diff.sum(axis=1)
+        if config.beta:
+            score = score + float(config.beta) * std.mean(axis=1)
+        return score
 
     if config.weights is not None:
         weights = np.asarray(config.weights)

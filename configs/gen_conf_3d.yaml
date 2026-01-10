@@ -1,0 +1,17 @@
+dataset:
+  path: data/raw/opv_db.csv
+  mol_column: mol
+  smiles_column: smile
+  max_atoms: 100
+
+model:
+  z_dim: 64
+  hidden_dim: 256
+
+training:
+  epochs: 50
+  batch_size: 16
+  lr: 0.001
+  patience: 5
+  device: auto
+  save_path: models/generator_3d/vae3d.pt

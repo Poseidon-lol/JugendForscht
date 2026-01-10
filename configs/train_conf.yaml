@@ -1,20 +1,20 @@
 dataset:
-  path: data/processed/surrogate_labelled.csv
-  target_columns: [HOMO_eV, LUMO_eV, gap_eV, IE_eV, EA_eV]
+  path: data/raw/opv_db.csv
+  target_columns: [homo, lumo, gap]
   val_fraction: 0.1
 surrogate:
   device: auto
   use_amp: true
-  compile: true
+  compile: false
   compile_mode: default
   compile_fullgraph: false
-  n_models: 5
+  n_models: 3
   epochs: 120
-  batch_size: 64
+  batch_size: 32
   lr: 0.001
-  weight_decay: 0.0001
-  patience: 40
-  scheduler_patience: 15
+  weight_decay: 0.0005
+  patience: 20
+  scheduler_patience: 10
   dropout: 0.1
   loss: mae
   hidden_dim: 192

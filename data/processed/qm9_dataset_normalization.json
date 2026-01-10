@@ -1,10 +1,3 @@
-{
-  "mean": {
-    "HOMO": -0.24000663996489557,
-    "LUMO": 0.01113923293093951
-  },
-  "std": {
-    "HOMO": 0.022151329203809557,
-    "LUMO": 0.04690662726563506
-  }
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:3c2f8cb936442f1216ff8f6c27ad13da796faf72b179c5334ac7c13236107956
+size 176

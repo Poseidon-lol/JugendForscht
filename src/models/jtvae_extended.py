@@ -73,7 +73,14 @@ except Exception:
 # RDKit
 try:
     from rdkit import Chem
+    from rdkit import RDLogger
     from rdkit.Chem import rdMolDescriptors
+    try:
+        from rdkit.Chem import BRICS
+        BRICS_AVAILABLE = True
+    except Exception:  # pragma: no cover - optional dependency
+        BRICS = None  # type: ignore
+        BRICS_AVAILABLE = False
     RDKit_AVAILABLE = True
 except Exception:
     RDKit_AVAILABLE = False
@@ -96,6 +103,39 @@ def _load_mol_no_kekulize(smiles: str):
     return mol
 
 
+@contextlib.contextmanager
+def _suppress_rdkit_errors():
+    """Temporarily silence RDKit error logging (valence spam during generation)."""
+
+    if not RDKit_AVAILABLE:
+        yield
+        return
+    try:
+        RDLogger.DisableLog("rdApp.error")
+        yield
+    finally:
+        with contextlib.suppress(Exception):
+            RDLogger.EnableLog("rdApp.error")
+
+
+def _is_valid_smiles(smiles: str) -> bool:
+    """Check SMILES validity with RDKit while suppressing stderr noise."""
+
+    if not smiles:
+        return False
+    if not RDKit_AVAILABLE:
+        return True
+    with _suppress_rdkit_errors():
+        mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return False
+    try:
+        err = Chem.SanitizeMol(mol, catchErrors=True)
+        return err == Chem.SanitizeFlags.SANITIZE_NONE
+    except Exception:
+        return False
+
+
 def extract_fragments(smiles: str) -> List[str]:
     """Extract ring fragments / Murcko scaffolds as candidate-junction-nodes.
 
@@ -104,7 +144,8 @@ def extract_fragments(smiles: str) -> List[str]:
     """
     if not RDKit_AVAILABLE:
         raise RuntimeError("RDKit required for fragmentation")
-    mol = _load_mol_no_kekulize(smiles)
+    with _suppress_rdkit_errors():
+        mol = _load_mol_no_kekulize(smiles)
     if mol is None:
         return []
     frags = set()
@@ -293,7 +334,8 @@ def assemble_fragments(
     smiles_list = []
     mols = []
     for idx, smi in valid_entries:
-        mol = Chem.MolFromSmiles(smi)
+        with _suppress_rdkit_errors():
+            mol = Chem.MolFromSmiles(smi)
         if mol is None:
             logger.warning("Skipping invalid fragment SMILES '%s' during assembly.", smi)
             continue
@@ -303,10 +345,95 @@ def assemble_fragments(
     if not mols:
         return "", "no_valid_fragments"
 
+    def _has_dummy_atoms(m: "Chem.Mol") -> bool:
+        return any(atom.GetAtomicNum() == 0 for atom in m.GetAtoms())
+
+    def _dummy_attachment_points(m: "Chem.Mol") -> List[Tuple[int, int, int]]:
+        points = []
+        for atom in m.GetAtoms():
+            if atom.GetAtomicNum() != 0:
+                continue
+            neighbors = [n.GetIdx() for n in atom.GetNeighbors()]
+            if not neighbors:
+                continue
+            points.append((atom.GetIdx(), neighbors[0], atom.GetIsotope()))
+        return points
+
+    def _connect_with_dummies(base: "Chem.Mol", frag: "Chem.Mol") -> Optional["Chem.Mol"]:
+        base_points = _dummy_attachment_points(base)
+        frag_points = _dummy_attachment_points(frag)
+        if not base_points or not frag_points:
+            return None
+        base_atoms = base.GetNumAtoms()
+        # prefer matching labels when available
+        candidates = []
+        for b_idx, b_nb, b_label in base_points:
+            for f_idx, f_nb, f_label in frag_points:
+                label_match = (b_label != 0 and f_label != 0 and b_label == f_label)
+                candidates.append((label_match, b_idx, b_nb, f_idx, f_nb))
+        candidates.sort(reverse=True)
+        for _, b_idx, b_nb, f_idx, f_nb in candidates:
+            combo = Chem.CombineMols(base, frag)
+            rw = Chem.RWMol(combo)
+            try:
+                rw.AddBond(b_nb, f_nb + base_atoms, Chem.BondType.SINGLE)
+                for idx in sorted([b_idx, f_idx + base_atoms], reverse=True):
+                    rw.RemoveAtom(idx)
+                merged = rw.GetMol()
+                with _suppress_rdkit_errors():
+                    Chem.SanitizeMol(merged)
+                return merged
+            except Exception:
+                continue
+        return None
+
+    has_dummy = any(_has_dummy_atoms(mol) for mol in mols)
+    if has_dummy and BRICS_AVAILABLE:
+        try:
+            max_depth = max(1, min(len(mols), 4))
+            max_mols = 50
+            for idx, prod in enumerate(
+                BRICS.BRICSBuild(
+                    mols,
+                    onlyCompleteMols=True,
+                    scrambleReagents=False,
+                    maxDepth=max_depth,
+                )
+            ):
+                if idx >= max_mols:
+                    break
+                try:
+                    with _suppress_rdkit_errors():
+                        Chem.SanitizeMol(prod)
+                    smi = Chem.MolToSmiles(prod, isomericSmiles=True)
+                    if smi:
+                        return smi, "assembled"
+                except Exception:
+                    continue
+        except Exception:
+            logger.debug("BRICS assembly failed; falling back to heuristic assembly.")
+    if has_dummy:
+        merged = mols[0]
+        success = True
+        for frag in mols[1:]:
+            combined = _connect_with_dummies(merged, frag)
+            if combined is None:
+                success = False
+                break
+            merged = combined
+        if success:
+            try:
+                smi = Chem.MolToSmiles(merged, isomericSmiles=True)
+                if smi:
+                    return smi, "assembled"
+            except Exception:
+                pass
+
     if len(mols) == 1 or adjacency is None:
         try:
             base = Chem.Mol(mols[0])
-            Chem.SanitizeMol(base)
+            with _suppress_rdkit_errors():
+                Chem.SanitizeMol(base)
             return Chem.MolToSmiles(base), "single_fragment"
         except Exception:
             return smiles_list[0], "single_fragment"
@@ -341,7 +468,8 @@ def assemble_fragments(
                 new_anchor = base_atoms + cand
                 try:
                     rw_trial.AddBond(base_anchor, new_anchor, Chem.BondType.SINGLE)
-                    Chem.SanitizeMol(rw_trial)
+                    with _suppress_rdkit_errors():
+                        Chem.SanitizeMol(rw_trial)
                     combined = rw_trial.GetMol()
                     anchor_indices.append(new_anchor)
                     success = True
@@ -359,7 +487,8 @@ def assemble_fragments(
             anchor_indices.append(base_atoms + fallback_anchor)
 
     try:
-        Chem.SanitizeMol(combined)
+        with _suppress_rdkit_errors():
+            Chem.SanitizeMol(combined)
         smiles = Chem.MolToSmiles(combined, isomericSmiles=True)
         return smiles, status
     except Exception as exc:  # pragma: no cover - defensive
@@ -382,6 +511,9 @@ def beam_search_fragments(
     threshold: float,
     max_nodes: int,
     penalties: Dict[str, float],
+    max_fragment_heavy_atoms: Optional[int] = None,
+    max_fragment_length: Optional[int] = None,
+    max_total_heavy_atoms: Optional[int] = None,
 ) -> Dict[str, object]:
     # logits: [max_nodes, vocab]
     device = logits.device
@@ -392,8 +524,28 @@ def beam_search_fragments(
         "smiles": [],
         "log_prob": 0.0,
         "status": "start",
+        "heavy_total": 0,
     }
     beams = [initial]
+
+    frag_heavy_cache: Dict[int, Optional[int]] = {}
+    frag_len_cache: Dict[int, int] = {}
+
+    def _frag_meta(idx: int, smi: Optional[str]) -> tuple[Optional[int], int]:
+        if idx in frag_heavy_cache:
+            return frag_heavy_cache[idx], frag_len_cache[idx]
+        heavy = None
+        if smi:
+            frag_len_cache[idx] = len(smi)
+            if RDKit_AVAILABLE:
+                with _suppress_rdkit_errors():
+                    mol = Chem.MolFromSmiles(smi)
+                if mol is not None:
+                    heavy = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() > 1)
+        else:
+            frag_len_cache[idx] = 0
+        frag_heavy_cache[idx] = heavy
+        return heavy, frag_len_cache[idx]
 
     for position in range(max_nodes):
         node_log_prob = log_probs[position]
@@ -402,6 +554,14 @@ def beam_search_fragments(
         for beam in beams:
             for lp, idx in zip(top_log_prob.tolist(), top_indices.tolist()):
                 frag_smiles = idx_to_smiles.get(idx)
+                frag_heavy, frag_len = _frag_meta(idx, frag_smiles)
+                if max_fragment_length is not None and frag_len > max_fragment_length:
+                    continue
+                if max_fragment_heavy_atoms is not None and frag_heavy is not None and frag_heavy > max_fragment_heavy_atoms:
+                    continue
+                heavy_total = beam.get("heavy_total", 0) + (frag_heavy or 0)
+                if max_total_heavy_atoms is not None and heavy_total > max_total_heavy_atoms:
+                    continue
                 new_indices = beam["indices"] + [idx]
                 new_smiles = beam["smiles"] + ([frag_smiles] if frag_smiles else [""])
                 score_log_prob = beam["log_prob"] + lp
@@ -418,6 +578,7 @@ def beam_search_fragments(
                         "assembled": assembled_smiles,
                         "status": status,
                         "log_prob": score_log_prob + status_score,
+                        "heavy_total": heavy_total,
                     }
                 )
         # prune
@@ -433,9 +594,30 @@ def beam_search_fragments(
             "score": float("-inf"),
         }
     best = beams[0]
+    assembled = best.get("assembled") or ".".join([s for s in best["smiles"] if s])
+    status = best.get("status", "unknown")
+    if _is_valid_smiles(assembled):
+        return {
+            "smiles": assembled,
+            "status": status,
+            "fragments": best["smiles"],
+            "score": best["log_prob"],
+        }
+    # fallback: choose a valid fragment (longest) if assembly invalid
+    valid_frags = [f for f in best["smiles"] if f and _is_valid_smiles(f)]
+    if valid_frags:
+        valid_frags.sort(key=len, reverse=True)
+        fallback = valid_frags[0]
+        return {
+            "smiles": fallback,
+            "status": "fragment_fallback",
+            "fragments": valid_frags,
+            "score": best["log_prob"],
+        }
+    # mark invalid while keeping fragments for debugging
     return {
-        "smiles": best.get("assembled") or ".".join([s for s in best["smiles"] if s]),
-        "status": best.get("status", "unknown"),
+        "smiles": "",
+        "status": "invalid_smiles",
         "fragments": best["smiles"],
         "score": best["log_prob"],
     }
@@ -535,6 +717,9 @@ class JTVAE(nn.Module):
                 cond_t = cond_t.unsqueeze(0)
             cond_t = cond_t.repeat(n_samples, 1)
             cond_t = cond_t.to(target)
+        elif self.cond_dim and self.cond_dim > 0:
+            # If conditioned model but no cond provided, sample with zero conditioning
+            cond_t = torch.zeros(n_samples, self.cond_dim, device=target)
         frags_logits, node_feats, adj_logits = self.decoder(z, max_tree_nodes=max_tree_nodes, cond=cond_t)
         if assemble_kwargs is None:
             assemble_kwargs = {}
@@ -568,6 +753,9 @@ class JTVAE(nn.Module):
             beam_width = assemble_kwargs.get("beam_width", 5)
             topk_per_node = assemble_kwargs.get("topk_per_node", 5)
             adj_threshold = assemble_kwargs.get("adjacency_threshold", 0.5)
+            max_frag_heavy = assemble_kwargs.get("max_fragment_heavy_atoms", None)
+            max_frag_len = assemble_kwargs.get("max_fragment_length", None)
+            max_total_heavy = assemble_kwargs.get("max_total_heavy_atoms", None)
 
             beam_result = beam_search_fragments(
                 frags_logits[b],
@@ -578,6 +766,9 @@ class JTVAE(nn.Module):
                 threshold=adj_threshold,
                 max_nodes=max_tree_nodes,
                 penalties=penalties,
+                max_fragment_heavy_atoms=max_frag_heavy,
+                max_fragment_length=max_frag_len,
+                max_total_heavy_atoms=max_total_heavy,
             )
             samples.append(beam_result)
         return samples
@@ -682,6 +873,8 @@ def train_jtvae(
     compile: bool = False,
     compile_mode: str = "default",
     compile_fullgraph: bool = False,
+    max_grad_norm: Optional[float] = None,
+    start_epoch: int = 1,
 ):
     os.makedirs(save_dir, exist_ok=True)
     device_spec = get_device(device)
@@ -698,6 +891,18 @@ def train_jtvae(
         )
     model.to(device_spec.target)
     compile_requested = bool(compile)
+    if compile_requested and device_spec.is_cuda:
+        try:
+            major, minor = torch.cuda.get_device_capability(device_spec.target)
+        except Exception:
+            major, minor = (0, 0)
+        if major < 7:
+            logging.getLogger(__name__).warning(
+                "torch.compile disabled for JT-VAE: GPU compute capability %d.%d < 7.0; falling back to eager.",
+                major,
+                minor,
+            )
+            compile_requested = False
     if compile_requested:
         compile_fn = getattr(torch, "compile", None)
         if compile_fn is None:
@@ -734,7 +939,8 @@ def train_jtvae(
     loader = PyGDataLoader(dataset, **loader_kwargs)
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled) if amp_enabled else None
     autocast_ctx = torch.cuda.amp.autocast if amp_enabled else contextlib.nullcontext
-    for epoch in range(1, epochs+1):
+    start_epoch = max(1, int(start_epoch))
+    for epoch in range(start_epoch, start_epoch + epochs):
         model.train()
         epoch_loss = 0.0
         epoch_recon = 0.0
@@ -780,10 +986,15 @@ def train_jtvae(
             opt.zero_grad(set_to_none=True)
             if scaler is not None:
                 scaler.scale(loss).backward()
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 scaler.step(opt)
                 scaler.update()
             else:
                 loss.backward()
+                if max_grad_norm is not None and max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 opt.step()
             epoch_loss += loss.item() * batch.num_graphs
             epoch_recon += recon.item() * batch.num_graphs
@@ -848,17 +1059,40 @@ def sample_conditional(
     )
 
     formatted: List[Dict[str, str]] = []
+    max_total_heavy = assemble_kwargs.get("max_total_heavy_atoms")
+    max_smiles_len = assemble_kwargs.get("max_smiles_length") or assemble_kwargs.get("max_smiles_len")
     for entry in raw_samples:
         if isinstance(entry, dict):
-            formatted.append(entry)
+            candidate = dict(entry)
         elif isinstance(entry, str):
-            formatted.append({"smiles": entry, "status": "raw"})
+            candidate = {"smiles": entry, "status": "raw"}
         elif isinstance(entry, (list, tuple)):
-            formatted.append(
-                {"smiles": "".join(entry), "status": "raw_fragments", "fragments": list(entry)}
-            )
+            candidate = {"smiles": "".join(entry), "status": "raw_fragments", "fragments": list(entry)}
         else:
-            formatted.append({"smiles": str(entry), "status": "unknown"})
+            candidate = {"smiles": str(entry), "status": "unknown"}
+
+        smiles_val = candidate.get("smiles") or ""
+        if RDKit_AVAILABLE and smiles_val:
+            if not _is_valid_smiles(smiles_val):
+                candidate = {
+                    "smiles": "",
+                    "status": "invalid_smiles",
+                    "fragments": candidate.get("fragments", []),
+                }
+            else:
+                try:
+                    mol = Chem.MolFromSmiles(smiles_val)
+                    heavy = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() > 1)
+                    if max_total_heavy is not None and heavy > max_total_heavy:
+                        candidate["status"] = "filtered_size_heavy"
+                        candidate["smiles"] = ""
+                    elif max_smiles_len is not None and len(smiles_val) > max_smiles_len:
+                        candidate["status"] = "filtered_size_len"
+                        candidate["smiles"] = ""
+                except Exception:
+                    candidate["status"] = "invalid_smiles"
+                    candidate["smiles"] = ""
+        formatted.append(candidate)
     return formatted
 
 # -------------------------

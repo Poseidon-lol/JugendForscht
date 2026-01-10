@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+data/
+qc_runs/
+qc_runs_smiles.csv
+tmp_*

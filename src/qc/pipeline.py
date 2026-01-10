@@ -5,6 +5,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, TYPE_CHECKING
+from pathlib import Path
 
 HARTREE_TO_EV = 27.211386245988
 
@@ -32,6 +33,7 @@ PROPERTY_ALIAS = {
     "gap": "gap_eV",
     "IE": "IE_eV",
     "EA": "EA_eV",
+    "lambda_max": "lambda_max_nm",
 }
 
 
@@ -57,6 +59,9 @@ class QCPipeline:
     ) -> None:
         self.config = config
         primary = executor or resolve_executor(config.quantum.engine)
+        if hasattr(primary, "work_dir"):
+            primary.work_dir = Path(config.work_dir)
+            primary.cleanup = config.cleanup_workdir
         if config.quantum.executable and hasattr(primary, "executable"):
             primary.executable = str(config.quantum.executable)
         self.fallback_executor = DEFAULT_EXECUTORS.get("semi_empirical", SemiEmpiricalExecutor())
@@ -66,40 +71,106 @@ class QCPipeline:
     # ------------------------------------------------------------------
     def run(self, job: DFTJobSpec) -> QCResult:
         start = time.time()
-        geometry = generate_3d_geometry(job.smiles, self.config.geometry)
-        if not geometry.success:
-            return QCResult(
-                job=job,
-                properties={},
-                status="geometry_error",
-                wall_time=time.time() - start,
-                error_message=geometry.message,
-                metadata={"stage": "geometry"},
-                geometry=geometry,
+        try:
+            geometry = generate_3d_geometry(job.smiles, self.config.geometry)
+        except Exception as exc:  # pragma: no cover - defensive against RDKit crashes
+            logger.exception("Geometry generation crashed for %s", job.smiles)
+            geometry = GeometryResult(
+                smiles=job.smiles,
+                mol=None,
+                success=False,
+                message=str(exc),
+                metadata={},
             )
 
         executor = self._select_executor(job)
         program_result: Optional[ProgramResult] = None
         status = "success"
         error_message = None
-        try:
-            program_result = executor.run(geometry, self._task_config(job))
-        except ExecutionError as exc:
-            logger.warning("Primary executor %s failed: %s; falling back.", executor.name, exc)
+        if not geometry.success:
+            if not self.config.allow_fallback:
+                return QCResult(
+                    job=job,
+                    properties={},
+                    status="error",
+                    wall_time=time.time() - start,
+                    error_message=geometry.message or "geometry failed",
+                    metadata={"stage": "geometry"},
+                    geometry=geometry,
+                )
+            logger.warning("Geometry failed for %s (%s); falling back.", job.smiles, geometry.message)
             status = "fallback"
-            error_message = str(exc)
-            program_result = self.fallback_executor.run(geometry, self._task_config(job))
-        except Exception as exc:  # pragma: no cover - unexpected
-            logger.exception("QC pipeline crashed for %s", job.smiles)
-            return QCResult(
-                job=job,
-                properties={},
-                status="error",
-                wall_time=time.time() - start,
-                error_message=str(exc),
-                metadata={"stage": "execution"},
-                geometry=geometry,
-            )
+            error_message = geometry.message
+            try:
+                program_result = self.fallback_executor.run(geometry, self._task_config(job))
+            except Exception as exc:
+                logger.exception("Fallback executor failed for %s", job.smiles)
+                return QCResult(
+                    job=job,
+                    properties={},
+                    status="error",
+                    wall_time=time.time() - start,
+                    error_message=f"geometry failed: {geometry.message}; fallback failed: {exc}",
+                    metadata={"stage": "geometry"},
+                    geometry=geometry,
+                )
+        else:
+            try:
+                program_result = executor.run(geometry, self._task_config(job))
+            except ExecutionError as exc:
+                if not self.config.allow_fallback:
+                    return QCResult(
+                        job=job,
+                        properties={},
+                        status="error",
+                        wall_time=time.time() - start,
+                        error_message=str(exc),
+                        metadata={"stage": "execution"},
+                        geometry=geometry,
+                    )
+                logger.warning("Primary executor %s failed: %s; falling back.", executor.name, exc)
+                status = "fallback"
+                error_message = str(exc)
+                try:
+                    program_result = self.fallback_executor.run(geometry, self._task_config(job))
+                except Exception as exc_fallback:
+                    logger.exception("Fallback executor failed for %s", job.smiles)
+                    return QCResult(
+                        job=job,
+                        properties={},
+                        status="error",
+                        wall_time=time.time() - start,
+                        error_message=f"primary failed: {exc}; fallback failed: {exc_fallback}",
+                        metadata={"stage": "execution"},
+                        geometry=geometry,
+                    )
+            except Exception as exc:  # pragma: no cover - unexpected
+                logger.exception("QC pipeline crashed for %s", job.smiles)
+                if not self.config.allow_fallback:
+                    return QCResult(
+                        job=job,
+                        properties={},
+                        status="error",
+                        wall_time=time.time() - start,
+                        error_message=str(exc),
+                        metadata={"stage": "execution"},
+                        geometry=geometry,
+                    )
+                status = "fallback"
+                error_message = str(exc)
+                try:
+                    program_result = self.fallback_executor.run(geometry, self._task_config(job))
+                except Exception as exc_fallback:
+                    logger.exception("Fallback executor failed for %s", job.smiles)
+                    return QCResult(
+                        job=job,
+                        properties={},
+                        status="error",
+                        wall_time=time.time() - start,
+                        error_message=f"execution crashed: {exc}; fallback failed: {exc_fallback}",
+                        metadata={"stage": "execution"},
+                        geometry=geometry,
+                    )
 
         properties = self._post_process(program_result.properties, job)
         metadata = dict(program_result.metadata)

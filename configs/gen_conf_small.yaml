@@ -1,16 +1,16 @@
 dataset:
-  path: data/processed/jtvae_pool_sub.csv
+  path: data/processed/jtvae_pool_filtered.csv
   target_columns: [HOMO_eV, LUMO_eV, IE_eV, EA_eV]
   max_fragments: 12
-  fragment_min_count: 2
+  fragment_min_count: 1
 model:
   z_dim: 64
   hidden_dim: 256
   cond_dim: 4
 training:
-  epochs: 5
-  batch_size: 1
-  lr: 0.001
+  epochs: 50
+  batch_size: 32
+  lr: 0.0005
   kl_weight: 0.5
   property_loss_weight: 0.1
   adjacency_loss_weight: 1.0

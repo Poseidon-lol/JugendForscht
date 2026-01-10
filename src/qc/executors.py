@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import os
 import shutil
 import subprocess
@@ -43,6 +44,8 @@ class ExternalProgramExecutor:
 
     name: str = "external"
     executable: str = ""
+    work_dir: Optional[Path] = None
+    cleanup: bool = True
 
     def __init__(self, command: Optional[str] = None) -> None:
         if command is not None:
@@ -55,8 +58,16 @@ class ExternalProgramExecutor:
     def run(self, geometry: GeometryResult, task: QuantumTaskConfig) -> ProgramResult:
         if not self.is_available():
             raise ExecutionError(f"Executable '{self.executable}' not found on PATH.")
-        with tempfile.TemporaryDirectory(prefix=f"{self.name}_") as tmpdir:
-            workdir = Path(tmpdir)
+        cleanup = getattr(task, "cleanup_workdir", getattr(self, "cleanup", True))
+        base_dir = getattr(task, "work_dir", None) or self.work_dir
+        tmp_ctx = None
+        if base_dir:
+            Path(base_dir).mkdir(parents=True, exist_ok=True)
+            workdir = Path(tempfile.mkdtemp(prefix=f"{self.name}_", dir=base_dir))
+        else:
+            tmp_ctx = tempfile.TemporaryDirectory(prefix=f"{self.name}_")
+            workdir = Path(tmp_ctx.__enter__())
+        try:
             input_path = workdir / "input.inp"
             output_path = workdir / "output.out"
             self._write_input(input_path, geometry, task)
@@ -66,8 +77,14 @@ class ExternalProgramExecutor:
             metadata["method"] = task.method
             metadata["basis"] = task.basis
             metadata["level_of_theory"] = task.level_of_theory if hasattr(task, "level_of_theory") else f"{task.method}/{task.basis}"
+            metadata["workdir"] = str(workdir)
             raw_text = output_path.read_text(encoding="utf-8", errors="replace")
             return ProgramResult(properties=properties, metadata=metadata, raw_output=raw_text)
+        finally:
+            if tmp_ctx is not None:
+                tmp_ctx.__exit__(None, None, None)
+            elif cleanup:
+                shutil.rmtree(workdir, ignore_errors=True)
 
     # -- hooks ----------------------------------------------------------
     def _write_input(self, path: Path, geometry: GeometryResult, task: QuantumTaskConfig) -> None:
@@ -177,10 +194,23 @@ class OrcaExecutor(ExternalProgramExecutor):
     executable = "orca"
 
     def _write_input(self, path: Path, geometry: GeometryResult, task: QuantumTaskConfig) -> None:
-        header = f"! {task.method} {task.basis} TightSCF"
+        keywords = [task.method, task.basis, "TightSCF"]
+        use_tddft = any(
+            p.lower().startswith("lambda")
+            or p.lower().startswith("absorption")
+            or "oscillator" in p.lower()
+            for p in task.properties
+        )
+        use_polar = any(p.lower() == "polarizability" for p in task.properties)
+        header = "! " + " ".join(keywords)
         if task.dispersion:
             header += f" {task.dispersion}"
-        lines = [header, f"* xyz {task.charge} {task.multiplicity}"]
+        lines = [header]
+        if use_tddft:
+            lines.extend(["%tddft", "nroots 10", "end"])
+        if use_polar:
+            lines.extend(["%elprop", "Polar 1", "end"])
+        lines.append(f"* xyz {task.charge} {task.multiplicity}")
         if geometry.xyz:
             for row in geometry.xyz.splitlines()[2:]:
                 if row.strip():
@@ -194,13 +224,41 @@ class OrcaExecutor(ExternalProgramExecutor):
         metadata: Dict[str, Any] = {}
         orbitals = []
         in_orbital_block = False
+        tddft_states = []
+        polar = None
         for line in text.splitlines():
             stripped = line.strip()
             if "TOTAL SCF ENERGY" in line:
+                continue
+            if "Total Energy" in line and ":" in line and "Eh" in line:
+                tokens = line.replace(":", " ").split()
+                for token in tokens:
+                    try:
+                        metadata["total_energy"] = float(token)
+                        break
+                    except Exception:
+                        continue
+            if "Isotropic polarizability" in line:
                 try:
-                    metadata["total_energy"] = float(line.split()[-1])
+                    polar = float(line.split()[-2])
+                    props["polarizability"] = polar
                 except Exception:
                     pass
+            if stripped.startswith("Excited State"):
+                # ORCA TDDFT excitation line: Excited State  1:   Singlet-A      3.12 eV 397.5 nm  f=0.1234
+                ev_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*eV", stripped)
+                nm_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*nm", stripped)
+                f_match = re.search(r"f\s*=\s*([0-9]+(?:\.[0-9]+)?)", stripped)
+                try:
+                    state = {
+                        "ev": float(ev_match.group(1)) if ev_match else None,
+                        "nm": float(nm_match.group(1)) if nm_match else None,
+                        "f": float(f_match.group(1)) if f_match else None,
+                    }
+                    if state["ev"] is not None or state["nm"] is not None:
+                        tddft_states.append(state)
+                except Exception:
+                    continue
             if stripped.startswith("ORBITAL ENERGIES"):
                 in_orbital_block = True
                 continue
@@ -225,6 +283,16 @@ class OrcaExecutor(ExternalProgramExecutor):
             props["HOMO"] = occupied[-1]
         if virtual:
             props["LUMO"] = virtual[0]
+        if "HOMO" in props and "LUMO" in props:
+            props["gap"] = props["LUMO"] - props["HOMO"]
+        # TDDFT excitations: choose strongest oscillator if available, else first
+        if tddft_states:
+            with_f = [s for s in tddft_states if s.get("f") is not None]
+            best = max(with_f, key=lambda s: s["f"]) if with_f else tddft_states[0]
+            if best.get("nm") is not None:
+                props["lambda_max_nm"] = float(best["nm"])
+            if best.get("f") is not None:
+                props["oscillator_strength"] = float(best["f"])
         return props, metadata
 
 

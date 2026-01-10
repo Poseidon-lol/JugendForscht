@@ -54,11 +54,20 @@ from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 from rdkit.Chem import AllChem
 try:
+    from rdkit.Chem import BRICS
+except ImportError:  # pragma: no cover - older RDKit versions
+    BRICS = None  # type: ignore
+try:
+    from rdkit.Chem import Recap
+except ImportError:  # pragma: no cover - older RDKit versions
+    Recap = None  # type: ignore
+try:
     from rdkit.Chem import rdFingerprintGenerator
 except ImportError:  # pragma: no cover - older RDKit versions
     rdFingerprintGenerator = None
 from rdkit import DataStructs
 from pathlib import Path
+import time
 import sys
 
 # Ensure the project root (with src/) is on sys.path
@@ -95,10 +104,41 @@ def _load_mol_no_kekulize(smiles: str):
     return mol
 
 
-def extract_fragments(smiles: str):
-    mol = _load_mol_no_kekulize(smiles)
+def _heavy_atom_count(mol: "Chem.Mol") -> int:
+    return sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() > 1)
+
+
+def _filter_and_sort_fragments(
+    fragments: Iterable[Tuple[str, int]],
+    *,
+    min_heavy_atoms: int,
+) -> List[str]:
+    dedup = {}
+    for smi, heavy in fragments:
+        if min_heavy_atoms > 0 and heavy < min_heavy_atoms:
+            continue
+        # keep the largest heavy count if duplicates appear
+        if smi not in dedup or heavy > dedup[smi]:
+            dedup[smi] = heavy
+    ordered = sorted(dedup.items(), key=lambda item: (item[1], item[0]), reverse=True)
+    return [smi for smi, _ in ordered]
+
+def _strip_dummy_atoms(mol: "Chem.Mol") -> Optional["Chem.Mol"]:
     if mol is None:
-        return []
+        return None
+    dummy_idxs = [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() == 0]
+    if not dummy_idxs:
+        return mol
+    rw = Chem.RWMol(mol)
+    for idx in sorted(dummy_idxs, reverse=True):
+        rw.RemoveAtom(idx)
+    stripped = rw.GetMol()
+    if stripped.GetNumAtoms() == 0:
+        return None
+    return stripped
+
+
+def _extract_ring_scaffold_fragments(mol: "Chem.Mol", smiles: str, min_heavy_atoms: int) -> List[str]:
     frags = set()
     try:
         ri = mol.GetRingInfo()
@@ -123,9 +163,123 @@ def extract_fragments(smiles: str):
             frags.add(ms)
     except Exception:
         logging.getLogger(__name__).debug("Murcko scaffold failed for %s", smiles)
-    if len(frags) == 0:
+    if not frags:
         frags.add(smiles)
-    return list(frags)
+    entries = []
+    for smi in frags:
+        frag_mol = Chem.MolFromSmiles(smi)
+        if frag_mol is None:
+            continue
+        entries.append((Chem.MolToSmiles(frag_mol, isomericSmiles=True), _heavy_atom_count(frag_mol)))
+    return _filter_and_sort_fragments(entries, min_heavy_atoms=min_heavy_atoms)
+
+def _extract_brics_fragments(mol: "Chem.Mol", min_heavy_atoms: int) -> List[str]:
+    if BRICS is None:
+        return []
+    try:
+        frags = BRICS.BRICSDecompose(
+            mol,
+            minFragmentSize=max(1, int(min_heavy_atoms)),
+            keepNonLeafNodes=False,
+            returnMols=False,
+        )
+    except Exception:
+        return []
+    entries = []
+    for smi in frags or []:
+        frag_mol = Chem.MolFromSmiles(smi)
+        if frag_mol is None:
+            continue
+        entries.append((Chem.MolToSmiles(frag_mol, isomericSmiles=True), _heavy_atom_count(frag_mol)))
+    return _filter_and_sort_fragments(entries, min_heavy_atoms=min_heavy_atoms)
+
+
+def _extract_recap_fragments(mol: "Chem.Mol", min_heavy_atoms: int) -> List[str]:
+    if Recap is None:
+        return []
+    try:
+        root = Recap.RecapDecompose(mol, minFragmentSize=max(0, int(min_heavy_atoms)))
+    except Exception:
+        return []
+    nodes = root.GetAllChildren() if root is not None else {}
+    entries = []
+    for node in nodes.values():
+        smi = getattr(node, "smiles", None)
+        if not smi:
+            continue
+        frag_mol = Chem.MolFromSmiles(smi)
+        if frag_mol is None:
+            continue
+        entries.append((Chem.MolToSmiles(frag_mol, isomericSmiles=True), _heavy_atom_count(frag_mol)))
+    return _filter_and_sort_fragments(entries, min_heavy_atoms=min_heavy_atoms)
+
+
+def _extract_rotatable_fragments(mol: "Chem.Mol", min_heavy_atoms: int) -> List[str]:
+    bond_indices = []
+    for bond in mol.GetBonds():
+        if bond.IsInRing():
+            continue
+        if bond.GetBondType() != Chem.BondType.SINGLE:
+            continue
+        a1 = bond.GetBeginAtom()
+        a2 = bond.GetEndAtom()
+        if a1.GetAtomicNum() <= 1 or a2.GetAtomicNum() <= 1:
+            continue
+        bond_indices.append(bond.GetIdx())
+    if not bond_indices:
+        return []
+    try:
+        frag_mol = Chem.FragmentOnBonds(mol, bond_indices, addDummies=False)
+        frags = Chem.GetMolFrags(frag_mol, asMols=True, sanitizeFrags=True)
+    except Exception:
+        return []
+    entries = []
+    for frag in frags:
+        if frag is None:
+            continue
+        heavy = _heavy_atom_count(frag)
+        smi = Chem.MolToSmiles(frag, isomericSmiles=True)
+        entries.append((smi, heavy))
+    return _filter_and_sort_fragments(entries, min_heavy_atoms=min_heavy_atoms)
+
+
+def extract_fragments(
+    smiles: str,
+    *,
+    method: str = "ring_scaffold",
+    min_heavy_atoms: int = 1,
+) -> List[str]:
+    mol = _load_mol_no_kekulize(smiles)
+    if mol is None:
+        return []
+    method_key = (method or "ring_scaffold").strip().lower()
+    fragments: List[str] = []
+    if method_key in {"hybrid", "auto"}:
+        fragments = _extract_rotatable_fragments(mol, min_heavy_atoms)
+        if len(fragments) < 2:
+            fragments = _extract_ring_scaffold_fragments(mol, smiles, min_heavy_atoms)
+    elif method_key in {"brics"}:
+        fragments = _extract_brics_fragments(mol, min_heavy_atoms)
+        if len(fragments) < 2:
+            fragments = _extract_ring_scaffold_fragments(mol, smiles, min_heavy_atoms)
+    elif method_key in {"recap"}:
+        fragments = _extract_recap_fragments(mol, min_heavy_atoms)
+        if len(fragments) < 2:
+            fragments = _extract_ring_scaffold_fragments(mol, smiles, min_heavy_atoms)
+    elif method_key in {"rotatable", "bond", "bondcut", "split"}:
+        fragments = _extract_rotatable_fragments(mol, min_heavy_atoms)
+        if not fragments:
+            fragments = _extract_ring_scaffold_fragments(mol, smiles, min_heavy_atoms)
+    elif method_key in {"ring_scaffold", "rings", "scaffold"}:
+        fragments = _extract_ring_scaffold_fragments(mol, smiles, min_heavy_atoms)
+    else:
+        logging.getLogger(__name__).warning(
+            "Unknown fragment_method '%s'; using ring_scaffold.", method
+        )
+        fragments = _extract_ring_scaffold_fragments(mol, smiles, min_heavy_atoms)
+    if not fragments:
+        fragments = [smiles]
+    return fragments
 
 
 _MORGAN_GENERATORS: Dict[Tuple[int, int], object] = {}
@@ -169,13 +323,25 @@ class JTPreprocessConfig:
     condition_columns: Sequence[str] = ("HOMO", "LUMO")
     normalise_conditions: bool = True
     min_fragment_frequency: int = 1
+    fragment_method: str = "ring_scaffold"
+    min_fragment_heavy_atoms: int = 1
     condition_stats: Dict[str, List[float]] = field(default_factory=dict)
 
 
-def build_fragment_vocab(smiles_list: Iterable[str], min_count: int = 1) -> Tuple[Dict[str, int], Dict[int, str]]:
+def build_fragment_vocab(
+    smiles_list: Iterable[str],
+    min_count: int = 1,
+    *,
+    fragment_method: str = "ring_scaffold",
+    min_fragment_heavy_atoms: int = 1,
+) -> Tuple[Dict[str, int], Dict[int, str]]:
     counter = defaultdict(int)
     for smi in smiles_list:
-        frags = extract_fragments(smi)
+        frags = extract_fragments(
+            smi,
+            method=fragment_method,
+            min_heavy_atoms=min_fragment_heavy_atoms,
+        )
         for f in frags:
             counter[f] += 1
     # filter by min_count
@@ -201,6 +367,7 @@ def fragment_adjacency_from_mol(smiles: str, fragments: list):
     # find occurrences (naive) by matching substructure
     for frag in fragments:
         pattern = Chem.MolFromSmiles(frag)
+        pattern = _strip_dummy_atoms(pattern)
         if pattern is None:
             frag_atom_sets[frag] = set()
             continue
@@ -239,9 +406,15 @@ def process_one(
     *,
     max_frags: int = 12,
     fp_bits: int = 512,
+    fragment_method: str = "ring_scaffold",
+    min_fragment_heavy_atoms: int = 1,
 ) -> Dict[str, torch.Tensor | np.ndarray | str]:
     # 1) extract fragments for this mol
-    frags = extract_fragments(smiles)
+    frags = extract_fragments(
+        smiles,
+        method=fragment_method,
+        min_heavy_atoms=min_fragment_heavy_atoms,
+    )
     # map to indices (filter unknown frags)
     frag_idxs = [frag2idx[f] for f in frags if f in frag2idx]
     # limit to max_frags
@@ -323,6 +496,8 @@ def prepare_jtvae_examples(
     fragment_vocab,
     *,
     config: Optional[JTPreprocessConfig] = None,
+    max_seconds_per_mol: float = 10.0,
+    max_heavy_atoms: Optional[int] = 80,
 ) -> List[Dict[str, torch.Tensor | np.ndarray | str]]:
     """Convert dataframe rows into JT-VAE training examples.
 
@@ -335,6 +510,9 @@ def prepare_jtvae_examples(
         as returned by :func:`build_fragment_vocab`.
     config:
         Optional :class:`JTPreprocessConfig` controlling preprocessing hyper-parameters.
+    max_heavy_atoms:
+        Skip molecules with more heavy atoms than this value. Set to ``None`` or
+        a non-positive value to disable the filter.
     """
 
     import pandas as pd
@@ -376,15 +554,55 @@ def prepare_jtvae_examples(
     cond_std = np.where(cond_std < 1e-8, 1.0, cond_std)
 
     examples: List[Dict[str, torch.Tensor | np.ndarray | str]] = []
-    for row in df.itertuples(index=False):
+    total = len(df)
+    log = logging.getLogger(__name__)
+    for idx, row in enumerate(df.itertuples(index=False), 1):
         smiles = getattr(row, "smiles")
         cond_values = [float(getattr(row, col)) for col in cond_cols]
-        ex = process_one(
+        log.debug("prepare_jtvae_examples: processing %d/%d | %s", idx, total, smiles)
+        if Chem is not None:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                log.warning("prepare_jtvae_examples: skipping %s (invalid SMILES)", smiles)
+                continue
+            heavy = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() > 1)
+            if max_heavy_atoms is not None and max_heavy_atoms > 0 and heavy > max_heavy_atoms:
+                log.warning(
+                    "prepare_jtvae_examples: skipping %s (heavy atoms %d > %d)",
+                    smiles,
+                    heavy,
+                    max_heavy_atoms,
+                )
+                continue
+        start = time.time()
+        try:
+            ex = process_one(
+                smiles,
+                cond_values,
+                frag2idx,
+                max_frags=config.max_fragments,
+                fp_bits=config.fp_bits,
+                fragment_method=config.fragment_method,
+                min_fragment_heavy_atoms=config.min_fragment_heavy_atoms,
+            )
+        except Exception as exc:
+            log.warning("prepare_jtvae_examples: skipping %s due to error: %s", smiles, exc)
+            continue
+        elapsed = time.time() - start
+        if elapsed > max_seconds_per_mol:
+            log.warning(
+                "prepare_jtvae_examples: skipping %s (processing took %.1fs > %.1fs)",
+                smiles,
+                elapsed,
+                max_seconds_per_mol,
+            )
+            continue
+        log.debug(
+            "prepare_jtvae_examples: processed %d/%d | %s in %.3fs",
+            idx,
+            total,
             smiles,
-            cond_values,
-            frag2idx,
-            max_frags=config.max_fragments,
-            fp_bits=config.fp_bits,
+            elapsed,
         )
         if config.normalise_conditions:
             norm = (ex["cond_raw"] - cond_mean) / cond_std
@@ -392,6 +610,8 @@ def prepare_jtvae_examples(
             norm = ex["cond_raw"]
         ex["cond"] = torch.tensor(norm, dtype=torch.float32)
         examples.append(ex)
+        if idx % 5000 == 0:
+            log.info("prepare_jtvae_examples: processed %d/%d molecules (%.1f%%)", idx, total, 100.0 * idx / total)
 
     config.condition_stats = {
         "mean": cond_mean.tolist(),

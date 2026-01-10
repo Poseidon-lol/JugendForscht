@@ -41,6 +41,13 @@ import numpy as np
 __all__ = ["DFTJobSpec", "DFTResult", "DFTInterface", "PseudoDFTSolver"]
 
 
+def _is_timeout_exception(exc: Exception) -> bool:
+    """Return True if exc looks like a timeout from futures/threads."""
+    if isinstance(exc, TimeoutError):
+        return True
+    return exc.__class__.__name__ == "TimeoutError"
+
+
 @dataclass
 class DFTJobSpec:
     smiles: str
@@ -143,9 +150,18 @@ class DFTInterface:
                 try:
                     raw = future.result(timeout=poll_interval)
                     self._collect_future(job_id, future, raw_value=raw)
-                except TimeoutError:
-                    continue
                 except Exception as exc:  # pragma: no cover - propagation
+                    if _is_timeout_exception(exc):
+                        if not future.done():
+                            continue
+                        # The future completed right as we timed out; re-fetch without timeout.
+                        try:
+                            raw = future.result()
+                        except Exception as final_exc:
+                            self._collect_exception(job_id, final_exc)
+                        else:
+                            self._collect_future(job_id, future, raw_value=raw)
+                        continue
                     self._collect_exception(job_id, exc)
             else:
                 time.sleep(poll_interval)

@@ -281,14 +281,15 @@ class SurrogateEnsemble:
         with config_path.open("w", encoding="utf-8") as fh:
             json.dump(self.config.to_dict(), fh, indent=2)
 
+        # Cast to built-in types for JSON serialisation
         meta = {
             "target_columns": list(self.target_columns),
-            "node_dim": self.node_dim,
-            "edge_dim": self.edge_dim,
-            "out_dim": self.out_dim,
-            "member_scores": self._member_scores,
-            "temperature": self.temperature_,
-            "validation_metrics": self._metrics,
+            "node_dim": int(self.node_dim) if self.node_dim is not None else None,
+            "edge_dim": int(self.edge_dim) if self.edge_dim is not None else None,
+            "out_dim": int(self.out_dim) if self.out_dim is not None else None,
+            "member_scores": [float(m) for m in self._member_scores],
+            "temperature": float(self.temperature_),
+            "validation_metrics": {k: float(v) for k, v in self._metrics.items()},
         }
         meta_path = target_dir / META_FILENAME
         with meta_path.open("w", encoding="utf-8") as fh:
@@ -420,6 +421,20 @@ class SurrogateEnsemble:
 
     def _maybe_compile_model(self, model: torch.nn.Module, *, mode: str = "default", fullgraph: bool = False) -> torch.nn.Module:
         compile_fn = getattr(torch, "compile", None)
+        if self.device.is_cuda:
+            try:
+                major, minor = torch.cuda.get_device_capability(self.device.target)
+            except Exception:
+                major, minor = (0, 0)
+            if major < 7:
+                if not self._compile_warning_emitted:
+                    logger.warning(
+                        "torch.compile disabled for surrogate: GPU compute capability %d.%d < 7.0; falling back to eager.",
+                        major,
+                        minor,
+                    )
+                    self._compile_warning_emitted = True
+                return model
         if compile_fn is None:
             if not self._compile_warning_emitted:
                 logger.warning(

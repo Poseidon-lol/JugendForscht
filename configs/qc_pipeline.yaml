@@ -7,12 +7,12 @@ geometry:
   use_etkdg: true
 quantum:
   engine: orca
-  executable: "D:/Ackern/Orca/orca.exe"
+  executable: orca
   method: B3LYP
   basis: def2-SVP
   level_of_theory: wb97xd/def2-SVP
   dispersion: D3BJ
-  properties: [HOMO, LUMO, gap, IE, EA, lambda_hole, lambda_electron, dipole, polarizability, packing_score, stability_index]
+  properties: [HOMO, LUMO, gap, IE, EA, lambda_hole, lambda_electron, dipole, polarizability, lambda_max, oscillator_strength, packing_score, stability_index]
   charge: 0
   multiplicity: 1
   solvent_model: null
@@ -21,5 +21,6 @@ poll_interval: 5.0
 work_dir: qc_runs
 cleanup_workdir: false
 store_metadata: true
+allow_fallback: false
 
 
