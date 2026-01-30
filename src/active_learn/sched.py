@@ -1,10 +1,4 @@
-"""
-Scheduling utilities for the active-learning loop.
-==================================================
-
-Keeps track of iteration counts, triggers retraining events and generator
-refresh cadence.
-"""
+"""scheduler tools fuer active learning loop"""
 
 from __future__ import annotations
 

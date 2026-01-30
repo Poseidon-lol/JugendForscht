@@ -1,24 +1,4 @@
-# src/models/mpnn.py
-"""
-Surrogate MPNN for predicting molecular properties (HOMO/LUMO)
----------------------------------------------------------------
-This module provides:
-- A lightweight Message Passing Neural Network (MPNN) based on PyTorch Geometric
-- Dataset wrapper utilities for PyG Data objects
-- Training / evaluation loops (supports ensemble training for uncertainty)
-
-Usage:
-    from src.data.featurization import mol_to_graph
-    from src.models.mpnn import MPModel, train_one, evaluate, train_ensemble
-
-Requirements:
-    torch, torch_geometric, scikit-learn, pandas, numpy
-
-Notes:
-- This is a starter implementation intended for extension.
-- For production: add learning rate schedulers, advanced regularization, logging (MLflow),
-  and better calibration for uncertainty estimates.
-"""
+"""leichte mpnn als surrogat fuer molekuel eigenschaften"""
 
 import os
 import math
@@ -64,11 +44,9 @@ except Exception:
 from src.utils.device import DeviceSpec, ensure_state_dict_on_cpu, get_device, move_to_device
 
 
-# -----------------------------
 # MPNN building blocks
-# -----------------------------
 class ResidualEdgeGatedMPNNLayer(MessagePassing):
-    """Edge-gated message passing with residual connections and layer norm."""
+    """edge gated message passing mit residual und layer norm"""
 
     def __init__(self, hidden_dim: int, dropout: float = 0.0):
         super().__init__(aggr="add")
@@ -109,17 +87,7 @@ class MPModel(nn.Module):
     def __init__(self, node_in_dim: int, edge_in_dim: int, hidden_dim: int = 128,
                  num_message_layers: int = 3, readout_dim: int = 128, out_dim: int = 2,
                  dropout: float = 0.0, readout_type: str = "mlp", pooling: str = "mean"):
-        """A small MPNN for regression.
-
-        Args:
-            node_in_dim: dimension of node feature vector
-            edge_in_dim: dimension of edge feature vector
-            hidden_dim: hidden dimension for message/update networks
-            num_message_layers: how many message-passing steps
-            readout_dim: dimension after pooling
-            out_dim: number of regression targets (e.g., HOMO,LUMO)
-            dropout: dropout probability applied after message layers (MC dropout support)
-        """
+        """kleine mpnn fuer regression"""
         super().__init__()
         self.node_encoder = nn.Linear(node_in_dim, hidden_dim)
         self.edge_encoder = nn.Linear(edge_in_dim, hidden_dim)
@@ -170,12 +138,10 @@ class MPModel(nn.Module):
         return out
 
 
-# -----------------------------
 # Dataset wrapper
-# -----------------------------
 class MoleculeDataset(PyGDataset):
     def __init__(self, dataframe, transform=None, pre_transform=None):
-        """Expects a pandas DataFrame with columns: 'smiles' and target columns (e.g. 'HOMO','LUMO')."""
+        """erwartet pandas df mit smiles und targets wie homo lumo"""
         super().__init__(None, transform, pre_transform)
         self.df = dataframe.reset_index(drop=True)
         # infer numeric target columns (exclude identifier / string columns)
@@ -196,9 +162,7 @@ class MoleculeDataset(PyGDataset):
         return data
 
 
-# -----------------------------
 # Training & evaluation utilities
-# -----------------------------
 
 def train_one(
     model: nn.Module,
@@ -274,20 +238,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: DeviceSpec | torch.de
     return mae, preds, trues
 
 
-# -----------------------------
 # Ensemble training (deep ensembles for uncertainty)
-# -----------------------------
 
 def train_ensemble(df, model_save_dir: str, n_models: int = 5, epochs: int = 50, batch_size: int = 32,
                    lr: float = 1e-3, device: str = None, weight_decay: float = 0.0,
                    loss: str = 'mae', dropout: float = 0.0):
-    """Train an ensemble of MPNNs and save them to disk.
-
-    Args:
-        df: pandas DataFrame with 'smiles' and target columns
-        model_save_dir: directory to save checkpoints
-        n_models: number of ensemble members
-    """
+    """trainiert mpnn ensemble und speichert"""
     device_spec = get_device(device)
     os.makedirs(model_save_dir, exist_ok=True)
 
@@ -329,21 +285,15 @@ def train_ensemble(df, model_save_dir: str, n_models: int = 5, epochs: int = 50,
                     os.path.join(model_save_dir, f'mpnn_member_{i}.pt')
                 )
             if epoch % 10 == 0 or epoch == 1:
-                print(f"Model {i} Epoch {epoch:03d} train_loss={train_loss:.4f} val_mae={val_mae:.4f}")
+                print(f"model {i} epoch {epoch:03d} train_loss={train_loss:.4f} val_mae={val_mae:.4f}")
 
-    print(f"Ensemble training completed. Models saved to {model_save_dir}")
+    print(f"ensemble training fertig modelle in {model_save_dir}")
 
 
-# -----------------------------
 # Ensemble inference util
-# -----------------------------
 
 def ensemble_predict(model_dir: str, dataset, device: str = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Load all model checkpoints in model_dir and return mean prediction and std (uncertainty).
-
-    Returns:
-        mean_pred: [N, out_dim], std_pred: [N, out_dim]
-    """
+    """laedt alle checkpoints und gibt mittelwert und std"""
     device_spec = get_device(device)
     ckpts = sorted([f for f in os.listdir(model_dir) if f.endswith('.pt')])
     if len(ckpts) == 0:
@@ -372,9 +322,7 @@ def ensemble_predict(model_dir: str, dataset, device: str = None) -> Tuple[np.nd
     return mean_pred, std_pred
 
 
-# -----------------------------
 # Quick demo / CLI
-# -----------------------------
 if __name__ == "__main__":
     import pandas as pd
 
@@ -391,5 +339,5 @@ if __name__ == "__main__":
     # load dataset and predict
     ds = MoleculeDataset(demo)
     mean, std = ensemble_predict('./models_demo', ds)
-    print('Mean predictions:\n', mean)
-    print('Std predictions:\n', std)
+    print('mean predictions:\n', mean)
+    print('std predictions:\n', std)

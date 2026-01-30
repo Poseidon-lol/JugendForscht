@@ -1,11 +1,4 @@
-"""
-Lightweight 3D surrogate that avoids torch-cluster / heavy SchNet deps.
-
-The model embeds atomic numbers, combines them with a small MLP on 3D
-coordinates, mean-pools per-graph, and predicts target properties via an MLP
-head. It is intentionally simple but fast to train and free of optional CUDA
-extensions so it can run in constrained environments.
-"""
+"""leichter 3d surrogate ohne schwere schnet deps"""
 
 from __future__ import annotations
 
@@ -22,24 +15,24 @@ from torch_geometric.nn import global_mean_pool
 @dataclass
 class SchNetConfig:
     hidden_channels: int = 128
-    num_filters: int = 128  # kept for backward compatibility (unused)
-    num_interactions: int = 6  # kept for backward compatibility (unused)
-    num_gaussians: int = 50  # kept for backward compatibility (unused)
-    cutoff: float = 10.0  # kept for backward compatibility (unused)
+    num_filters: int = 128  # legacy feld unused
+    num_interactions: int = 6  # legacy feld unused
+    num_gaussians: int = 50  # legacy feld unused
+    cutoff: float = 10.0  # legacy feld unused
     readout: str = "mean"
-    num_embeddings: int = 120  # max atomic number supported by embedding
+    num_embeddings: int = 120  # max atomnummer fuer embedding
     dropout: float = 0.1
     lr: float = 1e-3
     weight_decay: float = 0.0
     batch_size: int = 16
     epochs: int = 80
     patience: int = 10
-    device: str = "cpu"  # accepts "auto", "cpu", "cuda", or explicit device string
+    device: str = "cpu"  # auto cpu cuda oder explizit
     save_dir: Path = Path("models/surrogate_3d")
 
 
 class SchNetModel(torch.nn.Module):
-    """Simple point-cloud encoder for 3D molecules."""
+    """simpler point cloud encoder fuer 3d molekuele"""
 
     def __init__(self, cfg: SchNetConfig, out_dim: int):
         super().__init__()
@@ -61,7 +54,7 @@ class SchNetModel(torch.nn.Module):
         self.head = nn.Linear(cfg.hidden_channels, out_dim)
 
     def forward(self, z, pos, batch=None, mask=None):
-        # clip to embedding range to avoid OOB if exotic atoms appear
+        # clip embedding range falls exotische atome
         z_clamped = torch.clamp(z, max=self.cfg.num_embeddings - 1)
         h = self.atom_emb(z_clamped) + self.pos_mlp(pos)
         h = self.encoder(h)

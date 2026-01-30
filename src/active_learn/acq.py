@@ -1,11 +1,4 @@
-"""
-Acquisition strategies for the active learning loop.
-====================================================
-
-Provided functions operate on arrays of predictive means/std produced by the
-surrogate ensemble.  Multi-objective scenarios are supported via weighted
-aggregation or Pareto-front extraction.
-"""
+"""acquisition funktionen für active learning"""
 
 from __future__ import annotations
 
@@ -15,7 +8,7 @@ from typing import Optional, Sequence, Tuple
 from pathlib import Path
 import sys
 
-# Ensure the project root (with src/) is on sys.path
+
 PROJECT_ROOT = Path().resolve()
 for candidate in [PROJECT_ROOT, *PROJECT_ROOT.parents]:
     if (candidate / "src").exists():
@@ -23,7 +16,7 @@ for candidate in [PROJECT_ROOT, *PROJECT_ROOT.parents]:
             sys.path.insert(0, str(candidate))
         break
 else:
-    raise RuntimeError("Could not locate project root containing src/")
+    raise RuntimeError("project root ohne src gefunden")
 
 import numpy as np
 from src.models.scorer import pareto_front
@@ -40,7 +33,7 @@ __all__ = [
 
 @dataclass
 class AcquisitionConfig:
-    kind: str = "ucb"  # or "ei", "pi", "pareto"
+    kind: str = "ucb"  # oder "ei", "pi", "pareto"
     beta: float = 1.0
     xi: float = 0.01
     maximise: Optional[Sequence[bool]] = None
@@ -81,7 +74,7 @@ def acquisition_score(
     config: AcquisitionConfig,
     best_so_far: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Compute acquisition scores according to configuration."""
+    """berechnet acquisition scores wie in der configuration"""
 
     if mean.ndim == 1:
         mean = mean[:, None]
@@ -100,7 +93,7 @@ def acquisition_score(
         return pareto_rank(scores, maximise)
     if config.kind == "ei":
         if best_so_far is None:
-            raise ValueError("best_so_far required for expected improvement.")
+            raise ValueError("best_so_far gebraucht für erwartete verbesserung")
         best = np.asarray(best_so_far)
         if best.ndim == 0:
             best = np.full(mean.shape[1], best)
@@ -108,7 +101,7 @@ def acquisition_score(
         return ei.mean(axis=1)
     if config.kind == "pi":
         if best_so_far is None:
-            raise ValueError("best_so_far required for probability of improvement.")
+            raise ValueError("best_so_far gebrtaucht für wahrschienlichkeit von verbesserung")
         best = np.asarray(best_so_far)
         if best.ndim == 0:
             best = np.full(mean.shape[1], best)
@@ -116,26 +109,26 @@ def acquisition_score(
         return pi.mean(axis=1)
     if config.kind == "pareto":
         if config.maximise is None:
-            raise ValueError("maximise required for pareto acquisition.")
+            raise ValueError("maximise gebraucht für pareto acquisition")
         return pareto_rank(mean, config.maximise)
 
     if config.kind == "target":
         if config.targets is None:
-            raise ValueError("targets required for target acquisition.")
+            raise ValueError("targets gebraucht target acquisition")
         targets = np.asarray(config.targets, dtype=float)
         if targets.shape[0] != mean.shape[1]:
-            raise ValueError("targets length mismatch with mean dimension.")
+            raise ValueError("targets length ungleich mit mean dimension")
         diff = np.abs(mean - targets)
         if config.tolerances is not None:
             tol = np.asarray(config.tolerances, dtype=float)
             if tol.shape[0] != mean.shape[1]:
-                raise ValueError("tolerances length mismatch with mean dimension.")
+                raise ValueError("tolerances length ungleich mit mean dimension")
             tol = np.where(tol <= 0, 1.0, tol)
             diff = diff / tol
         if config.weights is not None:
             weights = np.asarray(config.weights, dtype=float)
             if weights.shape[0] != mean.shape[1]:
-                raise ValueError("weights length mismatch with mean dimension.")
+                raise ValueError("weights length ungleich mit mean dimension")
             diff = diff * weights
         score = -diff.sum(axis=1)
         if config.beta:
@@ -145,10 +138,10 @@ def acquisition_score(
     if config.weights is not None:
         weights = np.asarray(config.weights)
         if weights.shape[0] != mean.shape[1]:
-            raise ValueError("weights length mismatch with mean dimension.")
+            raise ValueError("weights length ungleich mit mean dimension")
         return (weights * mean).sum(axis=1)
 
-    raise ValueError(f"Unknown acquisition kind '{config.kind}'")
+    raise ValueError(f"unbekannter acquisition art'{config.kind}'")
 SQRT_2 = np.sqrt(2.0)
 SQRT_2PI = np.sqrt(2.0 * np.pi)
 

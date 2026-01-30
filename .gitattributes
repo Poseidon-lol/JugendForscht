@@ -1,11 +1,2 @@
-# Auto detect text files and perform LF normalization
+# Normalize line endings for text files
 * text=auto
-*.csv filter=lfs diff=lfs merge=lfs -text
-m1507656/df_31k.json filter=lfs diff=lfs merge=lfs -text
-m1507656/df_5k.json filter=lfs diff=lfs merge=lfs -text
-m1507656/df_62k.json filter=lfs diff=lfs merge=lfs -text
-data/** filter=lfs diff=lfs merge=lfs -text
-models/** filter=lfs diff=lfs merge=lfs -text
-models_demo/** filter=lfs diff=lfs merge=lfs -text
-qc_runs/** filter=lfs diff=lfs merge=lfs -text
-tmp_** filter=lfs diff=lfs merge=lfs -text

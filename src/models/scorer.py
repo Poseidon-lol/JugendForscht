@@ -1,12 +1,4 @@
-"""
-Scoring utilities for candidate molecules.
-==========================================
-
-The active-learning loop needs scalar scores to rank molecules according to
-multiple surrogate predictions (HOMO, LUMO, EA, IE, conductivity, etc.).
-This module implements a flexible weighting/constraint system together with
-Pareto-front helpers.
-"""
+"""scoring utils fuer kandidaten flexibles weighting + pareto helper"""
 
 from __future__ import annotations
 
@@ -24,7 +16,7 @@ __all__ = [
 
 @dataclass
 class PropertyObjective:
-    """Specification of a single property objective."""
+    """beschreibung eines property ziels"""
 
     name: str
     target: float
@@ -52,7 +44,7 @@ class PropertyObjective:
 
 
 def score_properties(predictions: Mapping[str, float], objectives: Sequence[PropertyObjective]) -> float:
-    """Aggregate surrogate predictions into a scalar score."""
+    """aggregiert surrogate vorhersagen zu einem scalar"""
 
     score = 0.0
     for obj in objectives:
@@ -63,14 +55,14 @@ def score_properties(predictions: Mapping[str, float], objectives: Sequence[Prop
 
 
 def pareto_front(points: np.ndarray, maximise: Sequence[bool]) -> np.ndarray:
-    """Return boolean mask for Pareto front of multi-objective array.
+    """liefert boolean maske fuer pareto front eines multi ziel arrays
 
     Parameters
     ----------
     points:
-        Array of shape [N, D] with property values.
+        array [N, D] mit property werten
     maximise:
-        Sequence indicating whether each dimension should be maximised.
+        sequenz ob jede dimension maximiert werden soll
     """
 
     if points.ndim != 2:

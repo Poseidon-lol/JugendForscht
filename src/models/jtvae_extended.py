@@ -1,41 +1,4 @@
-# src/models/jtvae_extended.py
-"""
-Simplified, GPU-ready conditional JT-VAE scaffold for molecular generation
-------------------------------------------------------------------------
-Goal:
-- Provide a production-oriented, PyTorch/PyG-compatible skeleton of a
-  Junction-Tree VAE (JT-VAE)-style generator that is conditional on target
-  properties (e.g., HOMO, LUMO for organic semiconductors).
-
-Disclaimer:
-- A full, research-grade JT-VAE (as in Jin et al. ICML'18) includes complex
-  routines for valid tree assembly, subgraph matching and discrete decoding
-  steps. Implementing every detail robustly would be lengthy; here I provide
-  a complete, GPU-capable scaffold with working graph encoders/decoders,
-  conditional latent handling, training loop and detailed TODOs where
-  project-specific research code must be filled in (e.g., tree assembly).
-
-Features implemented:
-- RDKit-based fragmentation to obtain candidate building blocks (rings, scaffolds)
-- PyG Message-Passing encoders for both junction-tree nodes (fragments)
-  and original molecular graph
-- Conditional latent concatenation for decoder conditioning
-- Sampling utilities to produce candidate molecules from latent + cond
-- Training loop (reconstruction + KL) and checkpoints
-
-What you still need to add/verify for research use:
-- The decoder's exact chemical-validity enforcing assembly (subgraph matching),
-  and the loss terms specific to JT-VAE (tree reconstruction loss, assembly loss)
-- Advanced scheduling, beam search or MCTS for decoding assembly
-- Optional chemically-aware priors and valence checks
-
-Requirements:
-  torch, torch_geometric, rdkit, numpy
-
-Usage (overview):
-  from src.models.jtvae_extended import JTVAE, train_jtvae, sample_conditional
-
-"""
+"""einigermaßen oke JT-VAE scaffold für molecular generation"""
 
 import os
 import math
@@ -87,9 +50,7 @@ except Exception:
 
 from src.utils.device import ensure_state_dict_on_cpu, get_device, move_to_device
 
-# -------------------------
 # Fragmentation utilities (very simplified)
-# -------------------------
 
 def _load_mol_no_kekulize(smiles: str):
     mol = Chem.MolFromSmiles(smiles, sanitize=False)
@@ -173,9 +134,7 @@ def extract_fragments(smiles: str) -> List[str]:
         logging.getLogger(__name__).debug("Murcko scaffold failed for %s", smiles)
     return [f for f in frags if len(f) > 0]
 
-# -------------------------
 # Simple GNN building blocks
-# -------------------------
 class GNNLayer(MessagePassing):
     def __init__(self, in_dim, out_dim):
         super().__init__(aggr='add')
@@ -212,9 +171,7 @@ class SimpleGNNEncoder(nn.Module):
             return pooled.to(h.device)
         return global_mean_pool(h, batch)
 
-# -------------------------
 # JT-VAE core classes (simplified)
-# -------------------------
 class JTEncoder(nn.Module):
     """Encodes both junction tree (fragment-level) and molecular graph into latents."""
 
@@ -337,7 +294,7 @@ def assemble_fragments(
         with _suppress_rdkit_errors():
             mol = Chem.MolFromSmiles(smi)
         if mol is None:
-            logger.warning("Skipping invalid fragment SMILES '%s' during assembly.", smi)
+            logger.warning("ungueltiges fragment smiles %s beim assembly skippe", smi)
             continue
         smiles_list.append(smi)
         mols.append(Chem.Mol(mol))
@@ -411,7 +368,7 @@ def assemble_fragments(
                 except Exception:
                     continue
         except Exception:
-            logger.debug("BRICS assembly failed; falling back to heuristic assembly.")
+            logger.debug("brics assembly failed fallback auf heuristische assembly")
     if has_dummy:
         merged = mols[0]
         success = True
@@ -480,7 +437,7 @@ def assemble_fragments(
             if success:
                 break
         if not success:
-            logger.warning("Unable to connect fragment %d during assembly; keeping disconnected.", i)
+            logger.warning("fragment %d laesst sich nicht verbinden bleibt getrennt", i)
             status = "partial"
             combined = Chem.Mol(combo)
             fallback_anchor = new_candidates[0] if new_candidates else 0
@@ -492,7 +449,7 @@ def assemble_fragments(
         smiles = Chem.MolToSmiles(combined, isomericSmiles=True)
         return smiles, status
     except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("Assembly sanitization failed: %s. Falling back to dot-joined fragments.", exc)
+        logger.warning("assembly sanitization failed %s fallback punktverknuepfte fragmente", exc)
         fallback = ".".join(smiles_list)
         return fallback, "failed"
 
@@ -773,9 +730,7 @@ class JTVAE(nn.Module):
             samples.append(beam_result)
         return samples
 
-# -------------------------
 # Loss and training utilities
-# -------------------------
 
 def jtvae_loss(
     frags_logits,
@@ -1095,9 +1050,7 @@ def sample_conditional(
         formatted.append(candidate)
     return formatted
 
-# -------------------------
 # Dataset adapter for JT-VAE
-# -------------------------
 class JTData(Data):
     def __inc__(self, key, value, *args, **kwargs):
         if key == "tree_edge_index":
@@ -1163,9 +1116,7 @@ class JTVDataset(torch.utils.data.Dataset):
         data.num_nodes = data.graph_num_nodes
         return data
 
-# -------------------------
 # Quick usage notes
-# -------------------------
 # Preprocessing required:
 # 1) Build fragment vocabulary across dataset -> fragment_idx mapping
 # 2) For each molecule: extract fragments, map to indices -> target_frag_idxs

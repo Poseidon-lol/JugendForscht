@@ -1,5 +1,5 @@
 """
-Active learning loop orchestrating surrogate, generator and DFT interface.
+Active learning loop dirigiert surrogate, generator und DFT interface
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from collections import deque
 from pathlib import Path
 import sys
 
-# Ensure the project root (with src/) is on sys.path
+
 PROJECT_ROOT = Path().resolve()
 for candidate in [PROJECT_ROOT, *PROJECT_ROOT.parents]:
     if (candidate / "src").exists():
@@ -17,7 +17,7 @@ for candidate in [PROJECT_ROOT, *PROJECT_ROOT.parents]:
             sys.path.insert(0, str(candidate))
         break
 else:
-    raise RuntimeError("Could not locate project root containing src/")
+    raise RuntimeError("project roout nicht auf src/")
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,16 +38,16 @@ from src.models.jtvae_extended import JTVAE, sample_conditional
 from src.utils.log import get_logger
 
 try:
-    _sa_score = None  # optional SA scorer; may be replaced if import succeeds
+    _sa_score = None  # optional SA scorer
     from rdkit import Chem
     from rdkit import RDLogger
     from rdkit.Chem import AllChem, DataStructs, Lipinski, rdMolDescriptors, Crippen
     try:
         from rdkit.Chem import rdFingerprintGenerator
-    except Exception:  # pragma: no cover - optional dependency
+    except Exception:  # auch optional
         rdFingerprintGenerator = None  # type: ignore
     try:
-        # optional synthetic accessibility scorer (may not be present in all RDKit builds)
+        # optionaler synthetic accessibility scorer (nicht in allen RDKits glaub) 
         from rdkit.Chem import rdMolDescriptors as _rdm
         from rdkit.Chem import Descriptors as _desc
         import sascorer as _sascorer  # type: ignore
@@ -55,10 +55,10 @@ try:
         def _sa_score(mol: "Chem.Mol") -> float:
             return float(_sascorer.calculateScore(mol))
 
-    except Exception:  # pragma: no cover - optional dependency
+    except Exception:  # optional wie davor
         _sa_score = None  # type: ignore
     RDKit_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency
+except Exception:  # wieder optional, werden safe nie benutzt
     RDKit_AVAILABLE = False
 
 logger = get_logger(__name__)
@@ -81,40 +81,40 @@ class LoopConfig:
     target_columns: Sequence[str] = ("HOMO", "LUMO")
     maximise: Sequence[bool] = (False, True)
     generator_samples: int = 32
-    generator_attempts: int = 5  # batches to sample when pool lacks candidates
+    generator_attempts: int = 5  # batches to sample wenn pool keine candidates hat
     results_dir: Path = Path("experiments")
     assemble: Dict[str, object] = field(default_factory=dict)
     diversity_threshold: float = 0.85
     diversity_metric: str = "tanimoto"
     generator_refresh: Dict[str, object] = field(default_factory=dict)
     property_aliases: Dict[str, str] = field(default_factory=dict)
-    max_pool_eval: Optional[int] = None  # cap number of pool candidates evaluated per iteration
-    max_generated_heavy_atoms: Optional[int] = None  # skip generated SMILES with too many heavy atoms
-    max_generated_smiles_len: Optional[int] = None  # skip generated SMILES with very long strings
-    generated_smiles_len_factor: Optional[float] = 1.5  # fallback length cap as factor of median length if max not set
-    require_conjugation: bool = True  # enforce basic OSC conjugation filter on generated SMILES
-    min_conjugated_bonds: int = 2  # minimum length of conjugated bond path (in bonds) if required
-    min_alternating_conjugated_bonds: int = 3  # require alternating single/double conjugated path of this length
-    min_pi_conjugated_fraction: Optional[float] = None  # fraction of atoms in conjugated/aromatic system
-    min_aromatic_rings: int = 1  # require at least this many aromatic rings
+    max_pool_eval: Optional[int] = None  # cap number von pool candidates evaluated pro iteration
+    max_generated_heavy_atoms: Optional[int] = None  # skipt generated SMILES mit zu vielen schweren atome
+    max_generated_smiles_len: Optional[int] = None  # skipt generated SMILES mit zu langer Länge
+    generated_smiles_len_factor: Optional[float] = 1.5  # fallback length cap als factor von median length wenn max nicht gesetted
+    require_conjugation: bool = True  # macht basic OSC conjugation filter auf die generierten SMILES
+    min_conjugated_bonds: int = 2  # selbserklärend
+    min_alternating_conjugated_bonds: int = 3  # macht das alternating single/double conjugated path von dieser länge sind
+    min_pi_conjugated_fraction: Optional[float] = None  # selbsterklärend
+    min_aromatic_rings: int = 1  # selbsterklärend
     max_rotatable_bonds: Optional[int] = None  # cap flexibility
-    max_rotatable_bonds_conjugated: Optional[int] = None  # cap rotatable bonds within conjugated subgraph
-    max_branch_points: Optional[int] = None  # cap number of heavy atoms with degree >= 3
+    max_rotatable_bonds_conjugated: Optional[int] = None  # cap rotatable bonds mit einem conjugated subgraph
+    max_branch_points: Optional[int] = None  # cap anzahl von heavy atoms mit degree >= 3
     max_branch_degree: Optional[int] = None  # cap max heavy-atom degree
-    max_charged_atoms: Optional[int] = None  # cap number of charged atoms
+    max_charged_atoms: Optional[int] = None  # cap anzahl von geladenen atomen
     property_filters: Dict[str, Sequence[float]] = field(default_factory=dict)  # min/max per property
-    require_neutral: bool = True  # skip charged molecules
-    sa_score_max: Optional[float] = None  # optional synthetic accessibility upper bound
-    physchem_filters: Dict[str, Sequence[float]] = field(default_factory=dict)  # e.g., clogp, tpsa, frac_csp3
-    scaffold_unique: bool = False  # enforce unique Murcko scaffolds
+    require_neutral: bool = True  #selbserklärend
+    sa_score_max: Optional[float] = None  # optional siehe oben
+    physchem_filters: Dict[str, Sequence[float]] = field(default_factory=dict)  # also clogp, tpsa, frac_csp3
+    scaffold_unique: bool = False  # macht das man unique Murcko scaffolds hat
     exclude_smiles_paths: Sequence[str] = tuple()  # optional CSV/TXT files with SMILES to exclude
-    auto_relax_filters: bool = True  # automatically relax structural filters if generation stalls
-    dft_job_defaults: Dict[str, object] = field(default_factory=dict)  # e.g., charge, multiplicity, metadata
+    auto_relax_filters: bool = True  #falls nichts generated wird, werden alle filter relaxed
+    dft_job_defaults: Dict[str, object] = field(default_factory=dict)  # also charge, multiplicity, metadata etc.
 
 
 @contextlib.contextmanager
 def _suppress_rdkit_errors():
-    """Temporarily silence RDKit error log noise when validating SMILES."""
+    """RDKit Fehler spam unterdrücken."""
 
     if not RDKit_AVAILABLE:
         yield
@@ -192,7 +192,7 @@ class ActiveLearningLoop:
                     self.generator_device = None
         if RDKit_AVAILABLE and self.diversity_threshold > 0:
             logger.info(
-                "Precomputing diversity fingerprints (threshold=%.2f) for %d molecules...",
+                "Precomputet diversity fingerprints (threshold=%.2f) fuer %d molecules...",
                 self.diversity_threshold,
                 len(pd.concat(
                     [self.labelled.get("smiles", pd.Series(dtype=str)), self.pool.get("smiles", pd.Series(dtype=str))],
@@ -210,10 +210,10 @@ class ActiveLearningLoop:
                     self._fingerprints.append(fp)
                 if idx % 5000 == 0:
                     logger.debug("Processed %d/%d fingerprints...", idx, len(initial_smiles))
-            logger.info("Finished fingerprint precompute (%d cached).", len(self._fingerprints))
+            logger.info("beendet fingerprint precompute (%d cached).", len(self._fingerprints))
 
         if len(self.config.target_columns) != len(self.config.maximise):
-            raise ValueError("target_columns and maximise length mismatch.")
+            raise ValueError("target_columns und maximise length mismatch.")
 
     def _current_best(self) -> Optional[np.ndarray]:
         if self.labelled.empty:
@@ -253,25 +253,25 @@ class ActiveLearningLoop:
         return fp
 
     def _refresh_target_indices(self) -> None:
-        """Align desired target columns with surrogate outputs (handles retrains/ordering)."""
+        """Aligned desired target columns mit surrogate outputs (handles retrains/ordering)"""
         surrogate_targets = list(getattr(self.surrogate, "target_columns", ()))
         if not surrogate_targets:
-            raise ValueError("Surrogate has no target_columns defined.")
+            raise ValueError("Surrogate keine target_columns defined.")
         self._target_indices = []
         for t in self.config.target_columns:
             if t not in surrogate_targets:
-                raise ValueError(f"Target column '{t}' not found in surrogate outputs: {surrogate_targets}")
+                raise ValueError(f"Target column '{t}' nicht gefudnen in surrogate outputs: {surrogate_targets}")
             self._target_indices.append(surrogate_targets.index(t))
 
     def _parse_smiles(self, smiles: str):
-        """Parse SMILES while suppressing RDKit stderr spam on invalid inputs."""
+        """Parset SMILES waehrend suppressed RDKit stderr spam auf invalid inputs"""
         if not RDKit_AVAILABLE or not smiles:
             return None
         with _suppress_rdkit_errors():
             return Chem.MolFromSmiles(smiles)
 
     def _init_property_filters(self) -> None:
-        """Map property_filters keys to surrogate output indices."""
+        """Map property_filters keys zum surrogate output indices"""
         self._filter_indices.clear()
         if not self.config.property_filters:
             return
@@ -283,7 +283,7 @@ class ActiveLearningLoop:
             else:
                 missing.append(prop)
         if missing:
-            logger.warning("property_filters entries not found in surrogate outputs and will be ignored: %s", missing)
+            logger.warning("property_filters entries nicht da in surrogate outputs und wird ignoriert: %s", missing)
 
     def _load_excluded_smiles(self, paths: Sequence[str]) -> set[str]:
         excluded: set[str] = set()
@@ -302,15 +302,15 @@ class ActiveLearningLoop:
                     else:
                         logger.warning("Exclude SMILES CSV missing 'smiles' column: %s", path)
                 else:
-                    # treat as plain text (one SMILES per line)
+                    # als plain text (1 SMILES pro linie)
                     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                         line = line.strip()
                         if line:
                             excluded.add(line)
                 if excluded:
-                    logger.info("Loaded %d SMILES to exclude from %s", len(excluded), path)
+                    logger.info("Loaded %d SMILES auszuschließen von %s", len(excluded), path)
             except Exception as exc:
-                logger.warning("Failed to load exclude SMILES from %s: %s", p, exc)
+                logger.warning("fehler beim laden exclude SMILES von %s: %s", p, exc)
         return excluded
 
     def _sample_generator3d_templates(self, n_samples: int):
@@ -392,7 +392,7 @@ class ActiveLearningLoop:
             else:
                 invalid += 1
         if invalid:
-            logger.warning("Dropped %d invalid SMILES from %s.", invalid, name)
+            logger.warning("Dropped %d invalid SMILES von %s", invalid, name)
         return canonical
 
     def _canonicalize_dataframe(self, df: pd.DataFrame, name: str) -> pd.DataFrame:
@@ -406,7 +406,7 @@ class ActiveLearningLoop:
                 invalid += 1
             canonical.append(canon)
         if invalid:
-            logger.warning("Dropping %d rows with invalid SMILES from %s dataset.", invalid, name)
+            logger.warning("Dropping %d rows mit invaliden SMILES von %s dataset", invalid, name)
         cleaned = df.copy()
         cleaned["smiles"] = canonical
         cleaned = cleaned.dropna(subset=["smiles"])
@@ -414,7 +414,7 @@ class ActiveLearningLoop:
         cleaned = cleaned.drop_duplicates(subset=["smiles"]).reset_index(drop=True)
         dropped = before - len(cleaned)
         if dropped:
-            logger.info("Removed %d duplicate SMILES from %s dataset.", dropped, name)
+            logger.info("entfernt %d duplicate SMILES von %s dataset", dropped, name)
         return cleaned
 
     def _filter_pool_overlaps(self) -> None:
@@ -430,7 +430,7 @@ class ActiveLearningLoop:
         removed = before - len(self.pool)
         if removed:
             logger.info(
-                "Removed %d pool entries already present in labelled/excluded datasets.",
+                "entfernt %d pool entries schon enthalten in labelled/excluded datasets",
                 removed,
             )
 
@@ -450,7 +450,7 @@ class ActiveLearningLoop:
         return True
 
     def _has_conjugation(self, mol: "Chem.Mol") -> bool:
-        """Basic OSC filter: require a minimum conjugated path length."""
+        """Basic OSC filter, checkt fuer conjugated path length"""
         if mol is None:
             return False
         min_len = int(getattr(self.config, "min_conjugated_bonds", 0) or 0)
@@ -599,7 +599,7 @@ class ActiveLearningLoop:
         return max_len
 
     def _smiles_from_atoms_positions(self, atom_z: List[int], pos: List[List[float]], mask: Optional[List[float]] = None) -> Optional[str]:
-        """Build SMILES from atomic numbers and 3D positions using RDKit bond perception."""
+        """Buildet SMILES von atomic numbers und 3D positions mit RDKit bond perception"""
         if not RDKit_AVAILABLE:
             return None
         try:
@@ -637,7 +637,7 @@ class ActiveLearningLoop:
             return None
 
     def _physchem_ok(self, mol: "Chem.Mol") -> bool:
-        """Check lightweight physchem/processability windows."""
+        """Checkt lightweight physchem/processability windows"""
 
         if mol is None or not RDKit_AVAILABLE:
             return False
@@ -677,7 +677,7 @@ class ActiveLearningLoop:
         return True
 
     def _has_alternating_conjugation(self, mol: "Chem.Mol", min_bonds: int) -> bool:
-        """Check for a conjugated path with alternating single/double bonds."""
+        """Checkt für einen conjugated path mit alternating single/double bonds"""
         if mol is None or min_bonds <= 0:
             return False
 
@@ -742,7 +742,7 @@ class ActiveLearningLoop:
         return float(lengths[mid])
 
     def _build_graph(self, smiles: str, row: Optional[pd.Series] = None):
-        """Featurize into the appropriate graph/point-cloud object based on surrogate type."""
+        """Featurize in den graph/point-cloud object rein based auf surrogate typ"""
         if self._is_schnet:
             mol_block = None
             if row is not None:
@@ -753,16 +753,16 @@ class ActiveLearningLoop:
             try:
                 return molblock_to_data(mol_block or "", smiles=smiles)
             except Exception as exc:
-                logger.debug("SchNet featurization failed for %s: %s", smiles, exc)
+                logger.debug("SchNet featurization failed fuer %s: %s", smiles, exc)
                 return None
         try:
             return mol_to_graph(smiles, y=None)
         except Exception as exc:
-            logger.debug("Featurization failed for %s: %s", smiles, exc)
+            logger.debug("Featurization failed fuer %s: %s", smiles, exc)
             return None
 
     def _passes_property_filters(self, smiles: str) -> bool:
-        """Use surrogate predictions to enforce property ranges on generated SMILES."""
+        """benutzt surrogate predictions um property ranges auf generated SMILES zu enforcen"""
         if not self._filter_indices:
             return True
         graph = self._build_graph(smiles)
@@ -807,7 +807,7 @@ class ActiveLearningLoop:
         try:
             import matplotlib.pyplot as plt  # type: ignore
         except Exception:  # pragma: no cover - optional dependency
-            logger.debug("Matplotlib not available; skipping diagnostics plot for iteration %d.", iteration)
+            logger.debug("Matplotlib nicht available; kein diagnostics plot fuer iteration %d.", iteration)
             return
         diag_dir = self.results_dir / "diagnostics"
         diag_dir.mkdir(parents=True, exist_ok=True)
@@ -838,7 +838,7 @@ class ActiveLearningLoop:
             from src.data.jt_preprocess import JTPreprocessConfig, prepare_jtvae_examples
             from src.models.jtvae_extended import JTVDataset, train_jtvae
         except Exception as exc:  # pragma: no cover - optional dependency
-            logger.warning("Skipping generator refresh: preprocessing utilities unavailable (%s).", exc)
+            logger.warning("Skippen von generator refresh: preprocessing utilities nicht da (%s).", exc)
             return
         df = self.labelled.dropna(subset=["smiles", *self.config.target_columns])
         if df.empty:
@@ -859,7 +859,7 @@ class ActiveLearningLoop:
                 max_heavy_atoms=max_heavy_atoms,
             )
         except Exception as exc:
-            logger.warning("Failed to prepare JT-VAE examples for refresh: %s", exc)
+            logger.warning("Failed prepare JT-VAE examples für refresh: %s", exc)
             return
         dataset = JTVDataset(examples)
         if len(dataset) == 0:
@@ -886,7 +886,7 @@ class ActiveLearningLoop:
         save_dir = Path(refresh_cfg.pop("save_dir"))
         save_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "Refreshing generator on %d molecules for %d epochs (lr=%s)",
+            "Refreshing generator on %d molecules fuer %d epochs (lr=%s)",
             len(dataset),
             refresh_cfg.get("epochs", 1),
             refresh_cfg.get("lr", 1e-4),
@@ -967,7 +967,7 @@ class ActiveLearningLoop:
                         int(getattr(self.config, "generator_samples", 1))
                     )
                     if template_batch is None:
-                        logger.warning("3D generator templates unavailable; skipping generation.")
+                        logger.warning("3D generator templates nicht da; skipping generation")
                         samples = []
                     else:
                         atom_z, mask = template_batch
@@ -1019,7 +1019,7 @@ class ActiveLearningLoop:
                 if mol is not None and RDKit_AVAILABLE:
                     frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
                     if len(frags) > 1:
-                        # keep the largest connected component to avoid disconnected assemblies
+                        # keept den largest connected component um disconnected assemblies zu vermeiden
                         frags_sorted = sorted(frags, key=lambda m: m.GetNumAtoms(), reverse=True)
                         mol = frags_sorted[0]
                         smiles_new = Chem.MolToSmiles(mol, isomericSmiles=True)
@@ -1071,7 +1071,7 @@ class ActiveLearningLoop:
                         rejected["filtered"] += 1
                         continue
                     if self.config.require_conjugation and not self._has_conjugation(mol):
-                        logger.debug("Skipping generated SMILES (fails conjugation filter): %s", smiles)
+                        logger.debug("Skipping generated SMILES (failt conjugation filter): %s", smiles)
                         rejected["filtered"] += 1
                         continue
                     if (
@@ -1079,7 +1079,7 @@ class ActiveLearningLoop:
                         and getattr(self.config, "min_pi_conjugated_fraction", None) is not None
                         and self._pi_conjugated_fraction(mol) < float(self.config.min_pi_conjugated_fraction)
                     ):
-                        logger.debug("Skipping generated SMILES (pi-conjugated fraction below threshold): %s", smiles)
+                        logger.debug("Skipping generated SMILES (pi-conjugated fraction unter threshold): %s", smiles)
                         rejected["filtered"] += 1
                         continue
                     if (
@@ -1171,38 +1171,38 @@ class ActiveLearningLoop:
                     rejected["invalid"] += 1
                     continue
                 if not skip_diversity and not self._passes_diversity(smiles):
-                    logger.debug("Filtered out %s due to diversity threshold.", smiles)
+                    logger.debug("Filtered out %s wegen diversity threshold.", smiles)
                     rejected["filtered"] += 1
                     continue
                 if self._filter_indices and not skip_property_filters and not self._passes_property_filters(smiles):
-                    logger.debug("Skipping generated SMILES (fails property filters): %s", smiles)
+                    logger.debug("Skipping generated SMILES (failt property filters): %s", smiles)
                     rejected["filtered"] += 1
                     continue
                 existing.add(smiles)
                 new_rows.append({"smiles": smiles, "assembly_status": status})
             if not new_rows:
-                # try a one-time relaxed assembly/sample if we failed to add anything
+                #  relaxed assembly/sample wenn nichts dazugekommen ist
                 if not relaxed_used and attempts >= max(1, max_attempts // 2):
                     relaxed_used = True
                     use_relaxed = True
-                    attempts -= 1  # do not count the relaxed retry against attempts budget
+                    attempts -= 1  #zählt nicht als vollwertiger versuch
                     relaxed_adj = min((assemble_kwargs or self.assemble_kwargs).get("adjacency_threshold", 0.7), 0.4)
                     relaxed_nodes = min((assemble_kwargs or self.assemble_kwargs).get("max_tree_nodes", 8) or 8, 6)
                     relaxed_beam = max((assemble_kwargs or self.assemble_kwargs).get("beam_width", 3), 5)
                     logger.info(
-                        "No accepted samples yet; retrying with relaxed assembly (adjacency_threshold=%s, max_tree_nodes=%s, beam_width=%s).",
+                        "keine accepted samples bis jetzt; nochmal mit relaxed assembly (adjacency_threshold=%s, max_tree_nodes=%s, beam_width=%s).",
                         relaxed_adj,
                         relaxed_nodes,
                         relaxed_beam,
                     )
                     continue
-                # if property filters are active and prevented additions, disable them for a retry
+                # wenn immernoch nichts accepted, dann property filter ausschalten
                 if self._filter_indices and not skip_property_filters and attempts >= max_attempts:
                     logger.info("No candidates accepted with property filters; retrying once with property filters disabled.")
                     skip_property_filters = True
                     attempts = 0
                     continue
-                # final structural relaxation fallback
+                # finaler structural relaxation fallback
                 if (
                     getattr(self.config, "auto_relax_filters", False)
                     and not relax_structural
@@ -1212,7 +1212,7 @@ class ActiveLearningLoop:
                     relax_structural = True
                     skip_diversity = True
                     logger.info(
-                        "Generation stalled; applying structural relaxation (disable pi_fraction/branch caps, lower alternation requirement, skip diversity) and retrying."
+                        "Generation stalled;  structural relaxation (disable pi_fraction/branch caps, lower alternation requirement, skip diversity) und nochaml"
                     )
                     attempts = 0
                     continue
@@ -1224,7 +1224,7 @@ class ActiveLearningLoop:
             logger.warning(
                 "Generator sampling exhausted after %d attempt(s): pool size %d (target %d). "
                 "Generated %d new entries; rejected invalid=%d duplicate=%d filtered=%d. "
-                "Consider relaxing filters or providing a non-empty seed pool.",
+                "filter sind kacke oder unleeren seed pool geben",
                 attempts,
                 len(self.pool),
                 min_size,
@@ -1244,7 +1244,7 @@ class ActiveLearningLoop:
             if RDKit_AVAILABLE:
                 mol = self._parse_smiles(smiles)
                 if mol is None:
-                    logger.warning("Skipping invalid SMILES %s during featurization.", smiles)
+                    logger.warning("Skipping invalid SMILES %s during featurization", smiles)
                     invalid_indices.append(idx)
                     continue
             data = self._build_graph(smiles, row=row)
@@ -1258,7 +1258,7 @@ class ActiveLearningLoop:
             self.pool = self.pool.drop(index=invalid_indices).reset_index(drop=True)
             valid_indices = list(range(len(graphs)))
             logger.info(
-                "Dropped %d invalid pool entries after featurization; %d candidates remain.",
+                "Dropped %d invalid pool entries nach featurization; %d candidates remain.",
                 len(invalid_indices),
                 len(graphs),
             )
@@ -1269,7 +1269,7 @@ class ActiveLearningLoop:
         if self._target_indices:
             mean = mean[:, self._target_indices]
             std = std[:, self._target_indices]
-        logger.debug("Mapped surrogate outputs to %d targets using indices %s.", mean.shape[1], self._target_indices)
+        logger.debug("Mapped surrogate outputs to %d targets mit indices %s.", mean.shape[1], self._target_indices)
         return mean, std
 
     def _score_candidates(self, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
@@ -1371,7 +1371,7 @@ class ActiveLearningLoop:
         assemble_kwargs: Optional[Dict] = None,
     ) -> pd.DataFrame:
         if self.scheduler.should_stop():
-            raise RuntimeError("Maximum number of iterations reached.")
+            raise RuntimeError("Maximum number of iterations erreicht")
 
         if assemble_kwargs is None:
             assemble_kwargs = self.assemble_kwargs
@@ -1383,16 +1383,16 @@ class ActiveLearningLoop:
             assemble_kwargs,
         )
         generated = self._ensure_pool(self.config.batch_size, cond, assemble_kwargs)
-        logger.debug("Pool replenished with %d new samples (if any). Current pool=%d", generated, len(self.pool))
+        logger.debug("Pool replenished mit %d new samples (wenn ueberhaupt). Current pool=%d", generated, len(self.pool))
         graphs, valid_idx = self._featurize_pool()
         if not graphs:
             raise RuntimeError(
-                "No valid candidates in pool after filtering invalid SMILES. "
-                "Generation/seed pool produced 0 usable molecules; relax filters or seed the pool before running."
+                "Keine valid candidates im pool nach filtering von invalid SMILES. "
+                "Generation/seed pool hat 0 usable molecules; relax filters oder fuege mehr seed molecules hinzu"
             )
         if self.config.max_pool_eval is not None and len(graphs) > self.config.max_pool_eval:
             logger.info(
-                "Capping pool evaluation to first %d of %d candidates.",
+                "Capping pool evaluation zu first %d of %d candidates.",
                 self.config.max_pool_eval,
                 len(graphs),
             )
@@ -1403,7 +1403,7 @@ class ActiveLearningLoop:
         mean, std = self._predict_pool(graphs)
         logger.debug("Predictions ready: mean shape %s, std shape %s", mean.shape, std.shape)
         scores = self._score_candidates(mean, std)
-        logger.debug("Acquisition scores computed.")
+        logger.debug("Acquisition scores computed")
 
         pool_slice = self.pool.iloc[valid_idx].copy()
         for i, name in enumerate(self.config.target_columns):
@@ -1463,4 +1463,4 @@ class ActiveLearningLoop:
             return
         path = self.results_dir / "active_learning_history.csv"
         pd.concat(self.history, ignore_index=True).to_csv(path, index=False)
-        logger.info("Saved active learning history to %s", path)
+        logger.info("Fertig, active learning history (ergebnnisse) in %s", path)

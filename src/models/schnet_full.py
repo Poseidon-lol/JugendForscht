@@ -1,11 +1,4 @@
-"""
-Real SchNet surrogate using torch_geometric.nn.models.SchNet.
-
-This keeps the lightweight pseudo-SchNet in `schnet_surrogate.py` untouched and
-adds a proper continuous-filter SchNet variant with configurable interaction
-blocks. It supports multi-target regression by replacing the final linear layer
-to match the requested output dimension.
-"""
+"""echtes schnet surrogate mit pyg schnet"""
 
 from __future__ import annotations
 
@@ -43,7 +36,7 @@ class RealSchNetConfig:
 
 
 class RealSchNetModel(torch.nn.Module):
-    """Wrapper around PyG's SchNet with a multi-target head."""
+    """wrapper um pyg schnet mit multi target head"""
 
     def __init__(self, cfg: RealSchNetConfig, out_dim: int) -> None:
         super().__init__()
@@ -70,7 +63,7 @@ class RealSchNetModel(torch.nn.Module):
 
 def _resolve_device(device_spec: str):
     dev = get_device(device_spec)
-    # torch_scatter (required by SchNet) is not DirectML-friendly; fall back to CPU.
+    # torch_scatter passt nicht zu directml also cpu fallback
     if dev.type == "directml":
         dev = get_device("cpu")
     return dev
