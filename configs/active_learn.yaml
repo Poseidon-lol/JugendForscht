@@ -1,0 +1,69 @@
+loop:
+  device: auto
+  batch_size: 4
+  target_columns: [homo, lumo, gap]
+  maximise: [false, true, false]
+  generator_samples: 32
+  results_dir: experiments/active_runs
+  diversity_threshold: 0.8
+  property_aliases:
+    HOMO: homo
+    LUMO: lumo
+    gap: gap
+  max_pool_eval: 5000
+  max_generated_heavy_atoms: null
+  max_generated_smiles_len: null
+  generated_smiles_len_factor: null
+  exclude_smiles_paths:
+    - experiments/active_runs/active_learning_history.csv
+  auto_relax_filters: false
+  require_conjugation: true
+  min_conjugated_bonds: 12
+  min_alternating_conjugated_bonds: 6
+  min_pi_conjugated_fraction: 0.6
+  min_aromatic_rings: 3
+  require_neutral: true
+  max_charged_atoms: 0
+  max_rotatable_bonds: 8
+  max_rotatable_bonds_conjugated: 2
+  max_branch_points: 4
+  max_branch_degree: 3
+  property_filters:
+    homo: [-5.9, -5.1]
+    lumo: [-3.6, -2.6]
+    gap: [1.5, 2.5]
+  generator_refresh:
+    epochs: 1
+    batch_size: 16
+    lr: 0.0001
+    kl_weight: 0.5
+    property_weight: 0.1
+    adj_weight: 1.0
+    max_heavy_atoms: null
+    save_dir: experiments/generator_refresh
+assemble:
+  beam_width: 6
+  topk_per_node: 6
+  adjacency_threshold: 0.45
+  max_tree_nodes: 16
+  max_fragment_heavy_atoms: null
+  max_fragment_length: null
+  max_total_heavy_atoms: null
+acquisition:
+  kind: target
+  beta: 0.0
+  targets: [-5.4, -2.8, 2.0]
+  tolerances: [0.3, 0.4, 0.5]
+  weights: [1.0, 0.8, 1.0]
+  maximise: [false, true, false]
+scheduler:
+  max_iterations: 20
+  surrogate_retrain_every: 1
+  generator_refresh_every: 0
+data:
+  labelled: data/raw/opv_db.csv
+  pool: data/raw/opv_db.csv
+  fragment_vocab: models/generator_stable/fragment_vocab.json
+qc:
+  pipeline_config: configs/qc_pipeline.yaml
+  result_store: data/processed/qc_results.csv

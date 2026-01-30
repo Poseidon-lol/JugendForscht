@@ -1,0 +1,23 @@
+dataset:
+  path: data/raw/opv_db.csv
+  mol_column: mol
+  smiles_column: smile
+  target_columns: [homo, lumo, gap]
+  val_fraction: 0.1
+
+model:
+  hidden_channels: 128
+  num_filters: 128
+  num_interactions: 6
+  num_gaussians: 50
+  cutoff: 10.0
+  readout: add
+
+training:
+  epochs: 120
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0
+  patience: 16
+  device: auto
+  save_dir: models/surrogate_3d

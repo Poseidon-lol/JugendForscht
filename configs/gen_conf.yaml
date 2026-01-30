@@ -1,0 +1,25 @@
+dataset:
+  path: data/raw/opv_db.csv
+  target_columns: [homo, lumo, gap]
+  max_fragments: 16
+  fragment_min_count: 1
+  max_heavy_atoms: null
+  fragment_method: brics
+  min_fragment_heavy_atoms: 4
+model:
+  z_dim: 64
+  hidden_dim: 256
+  cond_dim: 3
+training:
+  epochs: 120
+  batch_size: 32
+  lr: 0.001
+  kl_weight: 0.2
+  property_loss_weight: 0.1
+  adjacency_loss_weight: 0.5
+  device: auto
+  use_amp: true
+  compile: true
+  compile_mode: default
+  compile_fullgraph: false
+save_dir: models/generator

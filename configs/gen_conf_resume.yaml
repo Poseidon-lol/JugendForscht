@@ -1,0 +1,28 @@
+dataset:
+  path: data/raw/opv_db.csv
+  target_columns: [homo, lumo, gap]
+  max_fragments: 16
+  fragment_min_count: 1
+  max_heavy_atoms: null
+  fragment_method: hybrid
+  min_fragment_heavy_atoms: 4
+model:
+  z_dim: 64
+  hidden_dim: 256
+  cond_dim: 3
+training:
+  epochs: 96
+  batch_size: 32
+  lr: 0.0005
+  kl_weight: 0.2
+  property_loss_weight: 0.1
+  adjacency_loss_weight: 0.5
+  device: auto
+  use_amp: false
+  compile: false
+  compile_mode: default
+  compile_fullgraph: false
+  max_grad_norm: 1.0
+  resume_ckpt: models/generator/jtvae_epoch_24.pt
+  resume_epoch: 24
+save_dir: models/generator_stable

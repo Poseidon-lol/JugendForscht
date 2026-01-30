@@ -1,0 +1,22 @@
+targets:
+  HOMO_eV:
+    min: -6.0
+    max: -4.8
+  LUMO_eV:
+    min: -3.0
+    max: -2.0
+  gap_eV:
+    min: 1.5
+    max: 2.5
+  IE_eV:
+    min: 5.5
+    max: 7.0
+  EA_eV:
+    min: 1.5
+    max: 3.0
+  lambda_hole:
+    max: 0.25
+  lambda_electron:
+    max: 0.30
+
+min_confidence: 0.0

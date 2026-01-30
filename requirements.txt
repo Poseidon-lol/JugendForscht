@@ -1,0 +1,6 @@
+﻿torch
+torch_geometric
+rdkit
+numpy
+huggingface_hub[fsspec]
+pyyaml
