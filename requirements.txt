@@ -1,6 +1,28 @@
-﻿torch
-torch_geometric
-rdkit
-numpy
-huggingface_hub[fsspec]
-pyyaml
+# GPU-ready install target: Linux cloud VM with NVIDIA GPU (CUDA 12.1)
+# Recommended Python: 3.10 or 3.11
+
+# PyTorch CUDA wheels
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# PyG prebuilt wheels matched to torch 2.4.0 + CUDA 12.1
+-f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+
+torch==2.4.0+cu121
+torchvision==0.19.0+cu121
+torchaudio==2.4.0+cu121
+
+torch_geometric==2.6.1
+torch-scatter
+torch-sparse
+torch-cluster
+torch-spline-conv
+
+numpy>=1.26,<3
+pandas>=2.2,<3
+scikit-learn>=1.4,<2
+rdkit>=2023.9
+PyYAML>=6.0
+tqdm>=4.66
+matplotlib>=3.8
+seaborn>=0.13
+huggingface_hub[fsspec]>=0.24
